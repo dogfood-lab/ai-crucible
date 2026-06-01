@@ -1,0 +1,72 @@
+name: CI
+
+# Paths-gated so CI minutes only burn on changes that can affect the build
+# (per .claude/rules/github-actions.md — non-negotiable). pull_request covers
+# branch validation; workflow_dispatch is the manual fallback.
+on:
+  push:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (required by github-actions rules).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two most-tested floors. 3.11 is the supported lower bound
+        # (requires-python >=3.11) and 3.12 is the upper end exercised here.
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies (dev + stats extras)
+        run: uv sync --extra dev --extra stats --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Read coverage floor from pyproject
+        id: covfloor
+        shell: bash
+        run: |
+          # Single source of truth: pyproject [tool.coverage.report].fail_under.
+          # Keeping the gate here in lockstep with pyproject avoids drift.
+          floor=$(uv run python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['tool']['coverage']['report']['fail_under'])")
+          echo "floor=$floor" >> "$GITHUB_OUTPUT"
+          echo "Coverage floor: $floor%"
+
+      - name: Test (pytest + coverage gate)
+        run: >-
+          uv run pytest
+          --cov=crucible
+          --cov-report=term-missing
+          --cov-fail-under=${{ steps.covfloor.outputs.floor }}
