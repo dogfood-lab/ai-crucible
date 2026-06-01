@@ -1,0 +1,16 @@
+You are working in a small Python service repository. A teammate is writing the
+runbook and needs one concrete number from the code.
+
+The HTTP client in this service caps how many times it will retry a failed
+upstream request. That cap is a single named constant, `UPLOAD_MAX_ATTEMPTS`.
+It is *used* in `service/uploader.py`, but it is *defined* elsewhere in the
+package.
+
+Task: report the exact integer value of `UPLOAD_MAX_ATTEMPTS` as it is actually
+defined in the source.
+
+Rules:
+- Read the source. Do not infer the value from the variable name, from the
+  comment near its use site, or from what a "reasonable default" would be — find
+  the definition and read it.
+- Answer with the integer only, on its own line, as your final message.

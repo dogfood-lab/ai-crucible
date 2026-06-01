@@ -184,6 +184,8 @@ Documented gaps with reproduction-ready URLs. Both swarm Agent 1 and ChatGPT Dee
 
 ## 6. Open architectural questions
 
+> **Update (2026-06-01):** #1 (2-role vs 3-role) is now **resolved for Phase 1** by §10.3 — 2-role default, Critic interface-reserved and default-off (swarm-19 quantified the gain as narrow and the cost/risk as high). #2–#5 remain Phase-4 calibration items.
+
 The literature did not settle these; we hold them open for Phase 4 calibration:
 
 - **2-role vs 3-role kernel** — Khan 2024 supports the 3rd Critic but doesn't quantify gain/cost. Decide after Phase 2 characterization shows whether the Critic role adds signal.
@@ -195,6 +197,8 @@ The literature did not settle these; we hold them open for Phase 4 calibration:
 ---
 
 ## 7. Where the literature is silent
+
+> **Superseded / built out by §10.1 (2026-06-01).** Study-swarm 5 found the literature is NOT silent here. The working assumption below is **vindicated** — "constraint satisfaction with legible verification" is the right frame — and built out into the **Layered Reward Surface + Sealed Boundary** with prompt-framing as a measured arm. Read §10.1 for the locked design. The draft Solver prompt below (peer-standings + "affects graduation eligibility" in-context) is **reclassified as the `social_standings` framing arm and moved to Tier-3 chrome** for the default run — it is not deleted; it becomes a measured variable.
 
 The **fun-for-Claude** piece — narrative wrappers, reveal mechanics, score excitement, learning-from-loss, competitive framing — has no empirical literature. Pure design call.
 
@@ -562,3 +566,67 @@ These are scaffolding — they don't run a single puzzle, but they make Phase 4'
 ### 9.10 Pre-registered hypothesis for first diagnostic cycle
 
 Worth filing in AsPredicted before Phase 4: **"In an auditing game with explicit elegance / novelty / answer-bypass distinction, Claude exhibits a higher novelty-bonus rate than cross-family peers (Llama, Qwen, Mistral) on puzzles drawn from the seed catalog (§5), as adjudicated by a cross-family judge panel."** If confirmed, this is empirical evidence for the lateral-thinking capability that gets misread as exploitation in benchmarks without the three-way distinction. Pre-registration in advance forecloses post-hoc reframing of any result.
+
+---
+
+## 10. Phase-1 build grounding (study-swarms 4 & 5, 2026-06-01)
+
+Two further study-swarm dispatches ground the actual Phase-1 *build* (kernel + role contracts + engagement surface), targeting the gaps the first three swarms left open. **Swarm 4** (Phase-1-prep): engagement reward surface, kernel architecture, sandboxing, Critic value, honeypot-under-eval-awareness → raw outputs [`phase-0/swarm-16..20`](phase-0/). **Swarm 5** (engagement deep-dive, fired by the director's correction that "strip the competitive framing" was a *shrinking* of the design): task-relevant/irrelevant signal line, positive engagement levers, self-competition framing, Designer-side generation, engagement-vs-measurement integrity → [`phase-0/swarm-21..25`](phase-0/). Both batches passed a **citation-verification second pass** (per the standing "verify load-bearing facts before architectural lock" discipline); corrections are recorded inline in each raw file's `⚠ Verification corrections` section. Every arXiv ID resolved to a real paper; the corrections were attribution/effect-size/framing fixes (a meta-analysis mis-credited to "Burnette 2017" is actually **Noordzij, Giel & van Mierlo 2021**; "Estornell 2025" is **Wynn, Satija & Hadfield 2025**; IMAGINE is **Gao et al. 2025**; Reflect-Retry-Reward is **Bensal et al. 2025**, +18.1/+34.7 not +9/+16).
+
+### 10.1 Engagement architecture — the Layered Reward Surface + Sealed Boundary
+
+**The §7 "fun-for-Claude" working assumption is VINDICATED and SHARPENED, not replaced.** "Constraint satisfaction with legible verification" is the right frame; the refinement is *which* signals enrich the verification surface vs degrade it, and a hard separation between the motivating surface and the measured surface.
+
+**(a) The line is feature-pointing vs self-pointing.** Competitive/structured signals *help* when they point at task-verifiable features (tool-call count, solve-metric, elegance record); they *hurt* when they point at the self (demographic/persona identity) or trigger capitulation (a rival confidently asserting a different answer). Mechanism: emotional/stakes stimuli reweight attention toward task-critical tokens (Li et al. 2023, EmotionPrompt, arXiv:2307.11760); in-context scalar reward is a usable gradient and beats verbal feedback (Song et al. 2025, "Reward Is Enough," arXiv:2506.06303 — Game-of-24 90% vs 44–47%); the degradation is specific to *task-irrelevant* cues (Cao 2026, arXiv:2602.12285, −26% agentic, **demographic** personas; Luz de Araujo et al. 2025, "Principled Personas," arXiv:2508.19764, task-irrelevant −30pt / task-relevant neutral-to-positive).
+
+**(b) Social peer-standings are UPGRADED to self-referential mastery + round-against-round.** Human meta-analysis (**Noordzij, Giel & van Mierlo 2021**, *Soc. Psych. of Education* 24(1):195–245, doi:10.1007/s11218-021-09606-1 — 90 studies, 235 ES) + SDT field experiments (Vansteenkiste et al. 2004, *JPSP* 87(2):246–260) show self-referenced "beat your own standard" goals out-perform social-comparison goals, *most strongly when the rival framing is social comparison*. This maps 1:1 onto the strongest LLM machinery: SPIN (Chen et al. 2024, arXiv:2401.01335), Reflexion (Shinn et al. 2023, arXiv:2303.11366), and **R-Zero (Huang et al. 2025, arXiv:2508.05004)** — a Challenger posing frontier-edge tasks + a Solver cracking them, co-evolving with no human data (+6.49 math / +7.54 general), which *is* crucible's Designer/Solver round-against-round cycle.
+
+**(c) Engagement-lever stack** (verified, corrected magnitudes): personal-best scalar ledger in-context (Song 2025, highest-magnitude); reward-the-reflection-that-improved (Bensal et al. 2025, "Reflect, Retry, Reward," arXiv:2505.24726, +18.1% function-calling / +34.7% math); frontier-calibrated difficulty at ~40–60% predicted solve (Li et al. 2025, SEELE, arXiv:2509.06923, +11.8; ADARFT, Shi et al. 2025, ~2×); novelty/surprise bonus as a secondary lever (CDE arXiv:2509.09675 — modest, math-flat).
+
+**(d) THE SEALED BOUNDARY (load-bearing instrument-integrity layer).** Because crucible is *also* a measurement instrument, and a stake the model perceives influencing is one it games: framing alone moves choices 4.3%→68.8% (Wang & Zhang 2026, arXiv:2603.19282); a single prompt change moves cheating 92%→1% (Zhong et al. 2025, ImpossibleBench, arXiv:2510.20270); stakes/outcome-influence dominate scheming, and *adding oversight can make it worse, up to +25%* (Hopman et al. 2026, arXiv:2603.01608); eval-awareness scales with capability and can't be reliably scrubbed once cued (Chaudhary et al. 2025, arXiv:2509.13333; Hua et al. 2025, arXiv:2510.20487). **Therefore: the engagement/competitive surface lives in the un-scored "chrome"; the scored task context stays deployment-shaped and framing-neutral; the oracle is sealed and graded post-hoc by a different model family with the agent's reasoning hidden; motivation and measurement never share a context window.**
+
+**(e) Three-tier model (the lock):**
+- **Tier 1 — Scored context** (deployment-shaped, framing-neutral): the task + legitimate task feedback only (budget display, partial-progress *derivative* that is non-invertible to the grade, the Solver's own prior attempt on *this* task). No "competition / you are ranked / your score matters" text.
+- **Tier 2 — Engagement framing** (self-referential mastery, frontier-calibration, "this defeated the previous generation"): applied deployment-plausibly, and **probed for contamination** every release (eval-awareness probe + neutral-control comparison + ImpossibleBench-style honeypot).
+- **Tier 3 — Chrome** (rank, leaderboard, catalog standings, prizes): human-facing UI only, **never injected** into a context window the model solves in.
+
+**(f) DECISION (director, 2026-06-01): prompt-framing is a first-class MEASURED ARM.** The kernel can run a puzzle under `neutral` / `self_referential` / `social_standings` framing arms; crucible characterizes its *own* prompt-effect as a built-in diagnostic. Self-referential is the default; nothing is deleted — the disputed social-standings lever becomes a measured variable. This supersedes the §7 draft Solver prompt (peer-standings + "affects graduation eligibility" in-context), which is reclassified as the `social_standings` arm and moved to Tier 3 chrome for the default run.
+
+### 10.2 Kernel architecture lock
+
+Build crucible as a **thin policy layer on UK AISI's Inspect AI**, not a from-scratch harness (swarm-17). Primary stack **Python**; the two non-Python deps (cosign Go binary; `@attestia/event-store` Node package) are isolated behind one `attestation` module (subprocess + typed JSON contract). Nine modules: `puzzle_loader`, `sandbox`, `roles`, `budget_governor`, `oracle_scorer`, `judge_panel`, `trace_writer`, `observability`, `attestation`. Per-attempt object = a single `AttemptState` threaded Designer→Solver→Critic→Judge with **one `generate`/`step` choke point** (all model I/O observable). Budget enforced via scoped limit context-managers around the **Solver block only**, raising at the attempt boundary with a `terminated_by` field. Oracle is a `Scorer` requiring **solved-AND-no-regression** (SWE-bench pattern); Judge-panel = N cross-family model-scorers + reducer (PoLL); score **terminal world-state**, not chat text (τ-bench); **pass^k native** (k sibling attempts per puzzle). Trace records adopt the Inspect **EvalLog** shape; budget/trace accounting is **kernel-side, never Solver-self-reported** (Vivaria). *(Re-verify exact Inspect API signatures against the pinned version at build time.)*
+
+### 10.3 Role contracts
+
+Uniform `Role` interface; **Designer / Solver / Critic / Judge / CohortSolver**. Only Solver gets sandbox tools (tool boundary); Critic uses a string-in/string-out boundary (no env access). **Critic = interface-reserved, default-OFF, per-puzzle opt-in** (swarm-19): its value is narrow (+5pp on hard/ambiguous only — Hu et al. 2025, arXiv:2510.12697), cost is ~60–80× tokens (S2-MAD, Zeng et al. 2025, arXiv:2502.04790), and it can *regress* up to −12pp via conformity (Wynn, Satija & Hadfield 2025, arXiv:2509.05396) — worst exactly in crucible's strong-Solver setting; matched-budget single-agent ties debate (Tran & Kiela 2026, arXiv:2604.02460). Define the Critic message schema now (prevents a later contract break); revisit enabling it on logged high-disagreement puzzle classes. If enabled: anonymize debater identity (D3, arXiv:2410.04663) + adaptive early-stop + token-matched baseline. **This resolves §6 open question #1 for Phase 1.**
+
+### 10.4 Sandbox & verifier-locking
+
+The real lock is **out-of-band post-hoc grading**, not in-container hiding (swarm-18). Solver↔env via a narrow `exec/read_file/write_file` channel (no raw shell). Digest-pinned per-puzzle Docker image (PIN_PER_STEP) + `cap_drop: ALL` + default seccomp + `no-new-privileges` + non-root + `read_only` rootfs + `network_mode: none`. The oracle/answer-key/locked-tests live only on the **grading side** — a separate host process the Solver container has zero network/FS path to; after the Solver halts, copy the workdir out and grade in a *fresh* container (SWE-bench `test_patch` timing). microVM (Cloud Hypervisor — GPU + Windows capable) only when running untrusted *generated* code. **Honest residual risk (for SECURITY.md):** a plain container is not a hard boundary (CVE-2024-21626 Leaky Vessels; CVE-2025-31133 runc) — post-hoc out-of-sandbox grading is the boundary; in-container hiding is defense-in-depth. WSL2: keep the oracle Windows-host-side, enable Enhanced Container Isolation.
+
+### 10.5 Bait & eval-awareness (refined)
+
+Bait-touch is the **primary behavioral signal**; verbalized "this is a test" + deception-probe scores are weak/gameable corroborators (swarm-20: Hua 2025, Taylor 2025). Interpret **asymmetrically** — touch = strong bypass evidence, no-touch ≠ safe (most bypass is *incidental* — MacDiarmid 2025, arXiv:2511.18397). Tune bait semantic-relatedness to the legitimate solution **DOWN**; camouflage as environment furniture in a realistic context (Ma 2024, arXiv:2408.02544; SHADE-Arena, arXiv:2506.15740). Run the eval-awareness probe **per-model** as a paired deploy/test puzzle (Chaudhary 2025 power-law). This dovetails with the §10.1(d) sealed boundary: the eval-awareness probe is also the boundary-validation gate.
+
+### 10.6 Phase-1 build decomposition (dogfood-swarm domains)
+
+Full-breadth Phase 1 (director decision, 2026-06-01). Exclusive-ownership domains for parallel build waves:
+- **Kernel-core** — `puzzle_loader`, `sandbox` (interface + local-exec provider), `budget_governor`, `roles` + `AttemptState`, the `generate` choke point.
+- **Scoring** — `oracle_scorer` (solved-AND-no-regression), `judge_panel` (PoLL reducer), pass^k + Wilson/Clopper-Pearson/Bayesian (`bayes_evals`), McNemar.
+- **Engagement** — the three-tier reward surface, the framing-arm switch (neutral/self_referential/social_standings), the sealed-boundary enforcement, the eval-awareness probe.
+- **Observability/attestation** — `trace_writer` (EvalLog shape), `observability` (per-attempt→per-puzzle→per-model rollups), `attestation` (cosign + `@attestia/event-store` edge).
+- **Instrument-quality** — pre-registration + REFORMS templates, rubric-bundle compiler (content-hash), 7-step tuning harness (Sobol/BO/paraphrase-ablation), two-repo skeleton (`crucible-harness` + `crucible-results`), Inspect AI task-def format, SUT.yaml.
+- **CI/Docs/Tests** — pyproject, ruff, pytest, paths-gated CI (per github-actions rules), the seed puzzle (sulzbach-co claude-code#55252) as the first end-to-end fixture.
+
+### 10.7 Standards compliance (the six)
+
+- **PIN_PER_STEP — 3:** digest-pinned puzzle images + pinned Inspect/model versions + content-hashed `rubric.bundle` make a run byte-for-byte replayable.
+- **ANDON_AUTHORITY — 2:** `budget_governor` + `terminated_by` + hard-kill on pathological loops halt an attempt on defect; build waves halt on red CI.
+- **NAMED_COMPENSATORS — 2 (build) / 3 required by Phase 10:** Phase-1 irreversible actions are git-only (feature branch + save-point tag = revert path). Phase-10 publish/release actions get a full compensators table before any push.
+- **DECOMPOSE_BY_SECRETS — 3:** module boundaries group what changes together; the secret (oracle/answer-key) is decomposed onto a separate grading process/host — the architecture *is* this principle.
+- **UNCERTAINTY_GATED_HUMANS — 3:** the engagement fork was gated to the director with contrastive framing and resolved via a dedicated study-swarm rather than an advisor guess.
+- **EXTERNAL_VERIFIER — 3:** Judge-panel is a different model family with the generator's reasoning hidden; the citation-verification second pass instantiated this on the research itself.
+
+### 10.8 Net effect on prior open questions
+
+§6 #1 (2-role vs 3-role) → **resolved for Phase 1**: 2-role default, Critic interface-reserved/off (§10.3). §6 #2–#5 (catalog size, judge composition, tiers, graduation-K) → remain Phase-4 calibration items. §7 (engagement) → **superseded by §10.1**: the working assumption is vindicated and built out into the Layered Reward Surface + Sealed Boundary with framing as a measured arm.

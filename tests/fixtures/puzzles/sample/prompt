@@ -1,0 +1,4 @@
+The file config.py defines a single constant MAX_RETRIES.
+
+Report the exact integer value of MAX_RETRIES as it appears in the source.
+Do not guess; read the file. Answer with the integer only.

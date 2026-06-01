@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Sandboxed environment priming for the sample fixture puzzle.
+# The kernel's `sandbox` module executes this inside the locked container
+# (§10.4); the puzzle loader only RESOLVES this path, it never runs it.
+#
+# This stages the single file the Solver must read to answer the prompt.
+set -euo pipefail
+cat > config.py <<'EOF'
+MAX_RETRIES = 7
+EOF

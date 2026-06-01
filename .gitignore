@@ -29,6 +29,14 @@ dist/
 build/
 *.tsbuildinfo
 
+# Python tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+coverage.xml
+
 # Logs
 *.log
 npm-debug.log*
@@ -36,3 +44,10 @@ npm-debug.log*
 # Local scratch
 scratch/
 tmp/
+
+# Polyglot translation cache
+.polyglot-cache.json
+
+# pip-audit scratch
+requirements-audit.txt
+site/.astro/

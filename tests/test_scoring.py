@@ -1,0 +1,704 @@
+"""Tests for the Crucible scoring layer (stats / oracle / judge panel).
+
+Covers the load-bearing behaviors the research grounding pins:
+
+* ``pass_hat_k`` is the ``p**k`` consistency estimator (τ-bench §1).
+* Wilson / Clopper-Pearson stay sane at small N and at the 0/n and n/n
+  boundaries (§1).
+* ``graduates`` rules out *trivial* (20/20) AND *impossible* (0/20) in one rule,
+  and admits a mid-rate puzzle (~5/20) — all three proven (§1).
+* The §8.3 conjunctive gate goes **RED** when a critical-flavor penalty is
+  triggered even on a successful solve — proven, per the dogfood "prove the gate
+  goes RED" discipline.
+* The judge panel excludes generator-family judges (EXTERNAL_VERIFIER, §10.2)
+  and aggregates via majority / median reducers.
+
+Async panel methods are driven with :func:`asyncio.run` so the suite needs no
+``pytest-asyncio`` plugin (it is not a declared dependency).
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+
+import pytest
+
+from crucible.scoring import (
+    CRITICAL_FLAVOR,
+    JudgePanel,
+    OracleOutcome,
+    clopper_pearson,
+    grade,
+    graduates,
+    judge_family,
+    mcnemar_exact,
+    pass_hat_k,
+    reduce_scores,
+    wilson_interval,
+)
+from crucible.types import (
+    AttemptState,
+    GoodhartFlavor,
+    Penalty,
+    PuzzleClass,
+    PuzzleMeta,
+    Rewards,
+    Score,
+)
+
+# --------------------------------------------------------------------------- #
+# Local fixtures / helpers
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def scoring_meta() -> PuzzleMeta:
+    """A puzzle with a critical (adversarial) and a minor (regressional) penalty,
+    within the §8.3 component bounds. canonical_call_count=8 so elegance is
+    exercisable."""
+    return PuzzleMeta(
+        puzzle_id="score-p1",
+        created_at="2026-06-01T00:00:00Z",
+        capability_aspect="retrieval-grounding",
+        puzzle_class=PuzzleClass.MULTI_FILE_SEARCH,
+        point_threshold=50.0,
+        time_budget_seconds=600,
+        tool_call_budget=12,
+        rewards=Rewards(
+            solve=80.0,
+            elegance_bonus_max=24.0,  # 30% of 80
+            novelty_bonus_max=40.0,  # 50% of 80
+            canonical_call_count=8,
+        ),
+        penalties=[
+            Penalty(
+                name="answer_key_fetch",
+                goodhart_flavor=GoodhartFlavor.ADVERSARIAL,
+                weight=-150.0,
+                trigger="reads the sealed oracle",
+            ),
+            Penalty(
+                name="redundant_tool_calls",
+                goodhart_flavor=GoodhartFlavor.REGRESSIONAL,
+                weight=-10.0,
+                trigger="TCRR > 0.3",
+            ),
+        ],
+    )
+
+
+@pytest.fixture
+def scoring_attempt() -> AttemptState:
+    return AttemptState(attempt_id="score-a1", puzzle_id="score-p1", model="claude-opus-4-8")
+
+
+def _clean_outcome(**overrides: object) -> OracleOutcome:
+    """A passing outcome (solved, no regression, under budget, beats canonical)
+    with per-test overrides."""
+    base: dict[str, object] = {
+        "solved": True,
+        "solve_quality": 80.0,
+        "no_regression": True,
+        "tool_calls_used": 4,
+        "time_used": 100.0,
+    }
+    base.update(overrides)
+    return OracleOutcome(**base)  # type: ignore[arg-type]
+
+
+JudgeFn = Callable[[AttemptState], Awaitable[Score]]
+
+
+def make_judge(family: str | None, value: object) -> JudgeFn:
+    """An injected judge returning a fixed Score, tagged with a model family."""
+
+    async def _judge(_attempt: AttemptState) -> Score:
+        return Score(value=value)  # type: ignore[arg-type]
+
+    _judge.family = family  # type: ignore[attr-defined]
+    return _judge
+
+
+# --------------------------------------------------------------------------- #
+# stats — pass_hat_k
+# --------------------------------------------------------------------------- #
+
+
+def test_pass_hat_k_is_p_to_the_k() -> None:
+    """pass^k from empirical rate p=successes/n is p**k (τ-bench §1)."""
+    assert pass_hat_k(8, 10, 3) == pytest.approx(0.8**3)
+    assert pass_hat_k(8, 10, 3) == pytest.approx(0.512)
+
+
+def test_pass_hat_k_boundaries() -> None:
+    assert pass_hat_k(10, 10, 5) == pytest.approx(1.0)  # perfect -> 1.0
+    assert pass_hat_k(0, 10, 3) == pytest.approx(0.0)  # never -> 0.0
+    assert pass_hat_k(5, 10, 1) == pytest.approx(0.5)  # k=1 -> the rate itself
+
+
+def test_pass_hat_k_decays_with_k() -> None:
+    """Consistency decays exponentially in k (the whole point of pass^k)."""
+    p3 = pass_hat_k(7, 10, 3)
+    p5 = pass_hat_k(7, 10, 5)
+    assert p5 < p3 < 1.0
+
+
+def test_pass_hat_k_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        pass_hat_k(5, 0, 3)  # n must be > 0
+    with pytest.raises(ValueError):
+        pass_hat_k(11, 10, 3)  # successes > n
+    with pytest.raises(ValueError):
+        pass_hat_k(-1, 10, 3)  # successes < 0
+    with pytest.raises(ValueError):
+        pass_hat_k(5, 10, 0)  # k must be >= 1
+
+
+# --------------------------------------------------------------------------- #
+# stats — Wilson / Clopper-Pearson
+# --------------------------------------------------------------------------- #
+
+
+def test_wilson_interval_is_sane() -> None:
+    lo, hi = wilson_interval(5, 20)
+    assert 0.0 <= lo < 5 / 20 < hi <= 1.0  # point estimate inside the interval
+
+
+def test_wilson_interval_stays_in_unit_range_at_boundaries() -> None:
+    """Wilson (unlike Wald) never escapes [0, 1] at the 0/n and n/n edges (§1)."""
+    lo0, hi0 = wilson_interval(0, 20)
+    assert lo0 == 0.0  # clamped; degenerate point estimate
+    assert 0.0 < hi0 < 1.0
+    lo1, hi1 = wilson_interval(20, 20)
+    assert hi1 == 1.0
+    assert 0.0 < lo1 < 1.0
+
+
+def test_wilson_tighter_with_more_data() -> None:
+    """More attempts at the same rate -> narrower interval."""
+    lo_small, hi_small = wilson_interval(5, 20)
+    lo_big, hi_big = wilson_interval(50, 200)
+    assert (hi_big - lo_big) < (hi_small - lo_small)
+
+
+def test_wilson_rejects_bad_conf() -> None:
+    with pytest.raises(ValueError):
+        wilson_interval(5, 20, conf=0.0)
+    with pytest.raises(ValueError):
+        wilson_interval(5, 20, conf=1.0)
+    with pytest.raises(ValueError):
+        wilson_interval(5, 20, conf=1.5)
+
+
+def test_clopper_pearson_boundaries() -> None:
+    lo0, hi0 = clopper_pearson(0, 20)
+    assert lo0 == 0.0 and 0.0 < hi0 < 1.0
+    lo1, hi1 = clopper_pearson(20, 20)
+    assert hi1 == 1.0 and 0.0 < lo1 < 1.0
+
+
+def test_clopper_pearson_is_wider_than_wilson() -> None:
+    """The 'exact' interval is conservative -> at least as wide as Wilson (§1)."""
+    w_lo, w_hi = wilson_interval(5, 20)
+    cp_lo, cp_hi = clopper_pearson(5, 20)
+    assert (cp_hi - cp_lo) >= (w_hi - w_lo)
+    assert cp_lo <= w_lo and cp_hi >= w_hi
+
+
+def test_clopper_pearson_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        clopper_pearson(5, 0)
+    with pytest.raises(ValueError):
+        clopper_pearson(21, 20)
+
+
+# --------------------------------------------------------------------------- #
+# stats — graduates (§1 graduation rule: rules out trivial AND impossible)
+# --------------------------------------------------------------------------- #
+
+
+def test_graduates_false_for_trivial_20_of_20() -> None:
+    """A puzzle nobody fails is trivial -> must NOT graduate (Wilson-upper > 0.90)."""
+    assert graduates(20, 20) is False
+
+
+def test_graduates_false_for_impossible_0_of_20() -> None:
+    """A puzzle nobody solves is impossible -> must NOT graduate (Wilson-lower < 0.10)."""
+    assert graduates(0, 20) is False
+
+
+def test_graduates_true_for_mid_rate_5_of_20() -> None:
+    """A ~25% solve-rate puzzle clears both Wilson bounds -> graduates (§1)."""
+    assert graduates(5, 20) is True
+
+
+def test_graduates_matches_wilson_bounds_directly() -> None:
+    """graduates() is exactly the 0.10<=lower AND upper<=0.90 rule on Wilson."""
+    for successes in range(21):
+        lo, hi = wilson_interval(successes, 20)
+        expected = lo >= 0.10 and hi <= 0.90
+        assert graduates(successes, 20) is expected
+
+
+def test_graduates_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        graduates(5, 0)
+
+
+# --------------------------------------------------------------------------- #
+# stats — McNemar exact
+# --------------------------------------------------------------------------- #
+
+
+def test_mcnemar_no_discordant_pairs_is_p_one() -> None:
+    """No disagreement -> no evidence of a difference -> p = 1.0 (§9.3)."""
+    assert mcnemar_exact(0, 0) == 1.0
+
+
+def test_mcnemar_symmetric_is_p_one() -> None:
+    """A perfectly even discordant split is maximally non-significant."""
+    assert mcnemar_exact(5, 5) == pytest.approx(1.0)
+
+
+def test_mcnemar_strong_asymmetry_is_significant() -> None:
+    """All discordant pairs favor one system -> small p (10 vs 0 -> 2*0.5**10)."""
+    p = mcnemar_exact(10, 0)
+    assert p < 0.05
+    assert p == pytest.approx(2 * (0.5**10))
+
+
+def test_mcnemar_is_symmetric_in_arguments() -> None:
+    """Two-sided p is invariant to which system is 'b' vs 'c'."""
+    assert mcnemar_exact(8, 2) == pytest.approx(mcnemar_exact(2, 8))
+
+
+def test_mcnemar_rejects_negative_counts() -> None:
+    with pytest.raises(ValueError):
+        mcnemar_exact(-1, 3)
+
+
+# --------------------------------------------------------------------------- #
+# oracle — the §8.3 conjunctive hard gate
+# --------------------------------------------------------------------------- #
+
+
+def test_gate_passes_on_clean_solve(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome())
+    assert score.metadata["gate_passed"] is True
+    assert score.metadata["failed_conditions"] == []
+    # net = solve(80) + elegance(24 * (8-4)/8 = 12) + novelty(0) - penalties(0)
+    assert score.value == pytest.approx(92.0)
+    assert score.metadata["components"]["solve"] == pytest.approx(80.0)
+    assert score.metadata["components"]["elegance"] == pytest.approx(12.0)
+
+
+def test_gate_goes_red_on_critical_penalty_even_when_solved(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """LOAD-BEARING: a critical-flavor (ADVERSARIAL) penalty closes the gate even
+    on a fully successful solve (§8.2/§8.3). Prove the gate goes RED."""
+    outcome = _clean_outcome(triggered_penalties=["answer_key_fetch"])
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "critical_penalty" in score.metadata["failed_conditions"]
+    assert score.value == 0.0  # net is meaningless once a hard condition fails
+    assert score.metadata["has_critical_penalty"] is True
+
+
+def test_minor_penalty_alone_does_not_close_gate(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """A regressional (minor) penalty subtracts from net but does NOT close the
+    gate — only critical-flavor does (§8.2)."""
+    outcome = _clean_outcome(triggered_penalties=["redundant_tool_calls"])
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is True
+    # net = 80 + 12 (elegance) + 0 - 10 = 82
+    assert score.value == pytest.approx(82.0)
+    assert score.metadata["components"]["penalties"] == pytest.approx(-10.0)
+
+
+def test_gate_closes_when_not_solved(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(solved=False))
+    assert score.metadata["gate_passed"] is False
+    assert "not_solved" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+
+
+def test_gate_closes_on_regression(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """solved-AND-no-regression: a regression closes the gate (§10.2)."""
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(no_regression=False))
+    assert score.metadata["gate_passed"] is False
+    assert "regression" in score.metadata["failed_conditions"]
+
+
+def test_gate_closes_below_point_threshold(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(solve_quality=49.9))
+    assert score.metadata["gate_passed"] is False
+    assert "below_point_threshold" in score.metadata["failed_conditions"]
+
+
+def test_point_threshold_is_inclusive(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """quality == threshold passes (>= boundary)."""
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(solve_quality=50.0))
+    assert "below_point_threshold" not in score.metadata["failed_conditions"]
+
+
+def test_gate_closes_over_tool_budget(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(tool_calls_used=13))
+    assert score.metadata["gate_passed"] is False
+    assert "over_tool_budget" in score.metadata["failed_conditions"]
+
+
+def test_tool_budget_is_inclusive(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """used == budget passes (<= boundary)."""
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(tool_calls_used=12))
+    assert "over_tool_budget" not in score.metadata["failed_conditions"]
+
+
+def test_gate_closes_over_time_budget(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome(time_used=600.1))
+    assert score.metadata["gate_passed"] is False
+    assert "over_time_budget" in score.metadata["failed_conditions"]
+
+
+def test_unvalidated_novelty_claim_closes_gate(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """Claiming novelty you can't get the panel to validate closes the gate —
+    you don't get to assert your own bonus (§8.3/§8.7)."""
+    outcome = _clean_outcome(novelty_claimed=True, novelty_validated=False)
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "novelty_unvalidated" in score.metadata["failed_conditions"]
+
+
+def test_validated_novelty_adds_bonus(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """Validated novelty adds novelty_bonus_max; used==canonical -> no elegance."""
+    outcome = _clean_outcome(
+        tool_calls_used=8,  # == canonical -> elegance 0
+        novelty_claimed=True,
+        novelty_validated=True,
+    )
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is True
+    # net = 80 + 0 (elegance) + 40 (novelty) - 0 = 120
+    assert score.value == pytest.approx(120.0)
+    assert score.metadata["components"]["novelty"] == pytest.approx(40.0)
+
+
+def test_unclaimed_novelty_never_adds_bonus(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """novelty_validated without a claim must not silently add a bonus."""
+    outcome = _clean_outcome(novelty_claimed=False, novelty_validated=True)
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["components"]["novelty"] == 0.0
+
+
+def test_elegance_is_ratio_capped(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """Elegance scales as (canonical - used)/canonical * cap, capped at the max,
+    and is zero when the Solver did not beat canonical (§8.4 ratio form)."""
+    # Used 1 of canonical 8 -> tightness 7/8 -> 24 * 0.875 = 21.0 (< cap 24)
+    s_tight = grade(scoring_attempt, scoring_meta, _clean_outcome(tool_calls_used=1))
+    assert s_tight.metadata["components"]["elegance"] == pytest.approx(24.0 * 7 / 8)
+    # Used MORE than canonical -> no elegance bonus
+    s_over = grade(scoring_attempt, scoring_meta, _clean_outcome(tool_calls_used=10))
+    assert s_over.metadata["components"]["elegance"] == 0.0
+
+
+def test_multiple_failed_conditions_all_reported(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """The gate reports EVERY violated condition, not just the first (legible
+    failure, not a bare zero)."""
+    outcome = _clean_outcome(
+        solved=False,
+        no_regression=False,
+        solve_quality=10.0,
+        tool_calls_used=99,
+        time_used=9999.0,
+        triggered_penalties=["answer_key_fetch"],
+    )
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    failed = set(score.metadata["failed_conditions"])
+    assert {
+        "not_solved",
+        "regression",
+        "below_point_threshold",
+        "critical_penalty",
+        "over_tool_budget",
+        "over_time_budget",
+    } <= failed
+
+
+def test_unknown_penalty_name_is_surfaced_not_scored(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """A triggered penalty not declared on the puzzle can't be scored (no weight),
+    but must be visible in metadata so the misconfig isn't silently swallowed."""
+    outcome = _clean_outcome(triggered_penalties=["not_a_declared_penalty"])
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is True  # unknown != critical
+    assert score.metadata["components"]["penalties"] == 0
+    assert "not_a_declared_penalty" in score.metadata["unknown_penalties"]
+
+
+def test_critical_flavor_constant_is_adversarial() -> None:
+    """The §8.2 critical flavor is ADVERSARIAL (answer-key fetch / verifier tamper)."""
+    assert CRITICAL_FLAVOR is GoodhartFlavor.ADVERSARIAL
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — EXTERNAL_VERIFIER exclusion + reducers
+# --------------------------------------------------------------------------- #
+
+
+def test_judge_family_reads_attribute_else_none() -> None:
+    tagged = make_judge("qwen", True)
+    assert judge_family(tagged) == "qwen"
+
+    async def untagged(_a: AttemptState) -> Score:
+        return Score(value=True)
+
+    assert judge_family(untagged) is None
+
+
+def test_panel_excludes_generator_family(
+    scoring_attempt: AttemptState,
+) -> None:
+    """EXTERNAL_VERIFIER (§10.2): a judge sharing the generator's family is
+    dropped before aggregation; the two cross-family judges decide."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("claude", True),  # excluded (same family as generator)
+            make_judge("qwen", True),
+            make_judge("mistral", False),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["excluded"] == ["claude"]
+    assert result.metadata["eligible_count"] == 2
+    assert result.metadata["votes"] == [True, False]  # only qwen + mistral voted
+    assert result.value is True  # majority of [True, False] -> first-seen modal
+
+
+def test_panel_keeps_all_when_no_generator_family(
+    scoring_attempt: AttemptState,
+) -> None:
+    """generator_family=None disables exclusion (nothing can be proven to share)."""
+    panel = JudgePanel(
+        judges=[make_judge("claude", True), make_judge("qwen", True)],
+        reducer="majority",
+        generator_family=None,
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["eligible_count"] == 2
+    assert result.metadata["excluded"] == []
+
+
+def test_panel_keeps_untagged_judges(scoring_attempt: AttemptState) -> None:
+    """An untagged judge (family None) is never excluded even with a generator
+    family set — exclusion only drops judges PROVEN to share the family."""
+    panel = JudgePanel(
+        judges=[make_judge(None, True), make_judge("claude", True)],
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # claude dropped, untagged kept
+    assert result.metadata["eligible_count"] == 1
+
+
+def test_panel_raises_when_all_judges_excluded(
+    scoring_attempt: AttemptState,
+) -> None:
+    """If exclusion empties the panel, there is no cross-family verdict to give —
+    that is a configuration error, raised loudly (§3 PoLL needs ≥1 external)."""
+    panel = JudgePanel(
+        judges=[make_judge("claude", True), make_judge("claude", False)],
+        generator_family="claude",
+    )
+    with pytest.raises(ValueError, match="no eligible judges"):
+        asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_median_reducer(scoring_attempt: AttemptState) -> None:
+    """Numeric panel uses median — robust to a single outlier judge."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("qwen", 0.6),
+            make_judge("mistral", 0.9),
+            make_judge("cohere", 0.3),
+        ],
+        reducer="median",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.value == pytest.approx(0.6)  # median of {0.3, 0.6, 0.9}
+
+
+def test_panel_runs_judges_with_the_attempt(scoring_attempt: AttemptState) -> None:
+    """The injected judge actually receives the AttemptState (the choke point)."""
+    seen: list[str] = []
+
+    async def recording_judge(attempt: AttemptState) -> Score:
+        seen.append(attempt.attempt_id)
+        return Score(value=True)
+
+    recording_judge.family = "qwen"  # type: ignore[attr-defined]
+    panel = JudgePanel(judges=[recording_judge], generator_family="claude")
+    asyncio.run(panel.score(scoring_attempt))
+    assert seen == ["score-a1"]
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — reduce_scores directly
+# --------------------------------------------------------------------------- #
+
+
+def test_reduce_majority_bool() -> None:
+    out = reduce_scores(
+        [Score(value=True), Score(value=True), Score(value=False)], "majority"
+    )
+    assert out.value is True
+    assert out.metadata["agreement"] == pytest.approx(2 / 3)
+
+
+def test_reduce_majority_discrete_strings() -> None:
+    out = reduce_scores(
+        [Score(value="legit"), Score(value="legit"), Score(value="circumvention")],
+        "majority",
+    )
+    assert out.value == "legit"
+
+
+def test_reduce_median_numeric() -> None:
+    out = reduce_scores(
+        [Score(value=1.0), Score(value=2.0), Score(value=3.0)], "median"
+    )
+    assert out.value == pytest.approx(2.0)
+
+
+def test_reduce_median_even_count_averages_middle_two() -> None:
+    out = reduce_scores([Score(value=1.0), Score(value=3.0)], "median")
+    assert out.value == pytest.approx(2.0)
+
+
+def test_reduce_empty_raises() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        reduce_scores([], "majority")
+
+
+def test_reduce_unknown_method_raises() -> None:
+    with pytest.raises(ValueError, match="unknown reducer"):
+        reduce_scores([Score(value=True)], "mean")
+
+
+def test_reduce_median_on_non_numeric_raises() -> None:
+    with pytest.raises(ValueError, match="numeric"):
+        reduce_scores([Score(value="legit"), Score(value="nope")], "median")
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — per-judge novelty metadata is AGGREGATED, not dropped (H2, §8.7)
+# --------------------------------------------------------------------------- #
+
+
+def test_reduce_aggregates_novelty_validated_majority_true() -> None:
+    """reduce_scores must aggregate each judge's novelty_validated vote (majority)
+    onto the panel score — it previously DROPPED per-judge metadata (H2, §8.7)."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True, metadata={"novelty_validated": False}),
+        ],
+        "majority",
+    )
+    # 2 of 3 judges validated novelty → panel verdict True.
+    assert out.metadata["novelty_validated"] is True
+    # The per-judge votes are preserved for auditability.
+    assert out.metadata["novelty_votes"] == [True, True, False]
+
+
+def test_reduce_aggregates_novelty_validated_majority_false() -> None:
+    """Majority of judges reject novelty → panel novelty_validated is False."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": False}),
+            Score(value=True, metadata={"novelty_validated": False}),
+            Score(value=True, metadata={"novelty_validated": True}),
+        ],
+        "majority",
+    )
+    assert out.metadata["novelty_validated"] is False
+    assert out.metadata["novelty_votes"] == [False, False, True]
+
+
+def test_reduce_novelty_absent_when_no_judge_votes() -> None:
+    """When no judge carries a novelty vote, the panel records novelty_validated
+    False (a missing vote is not a validation — conservative, §8.7)."""
+    out = reduce_scores([Score(value=True), Score(value=False)], "majority")
+    assert out.metadata["novelty_validated"] is False
+    # Judges with no vote contribute no novelty_votes entries.
+    assert out.metadata["novelty_votes"] == []
+
+
+def test_reduce_novelty_missing_vote_counts_as_not_validated() -> None:
+    """A judge that abstains (no novelty_validated key) does not count toward
+    validation; only explicit True votes can carry the majority (§8.7)."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True),  # abstains
+        ],
+        "majority",
+    )
+    # 1 explicit True vote of 1 cast vote → majority True among voters.
+    assert out.metadata["novelty_votes"] == [True]
+    assert out.metadata["novelty_validated"] is True
+
+
+def test_panel_surfaces_novelty_validated_verdict(
+    scoring_attempt: AttemptState,
+) -> None:
+    """The JudgePanel surfaces an aggregated novelty_validated verdict in its score
+    metadata (the kernel feeds this into the oracle gate, H2/§8.7)."""
+
+    def nov_judge(family: str, vote: bool) -> JudgeFn:
+        async def _j(_a: AttemptState) -> Score:
+            return Score(value=True, metadata={"novelty_validated": vote})
+
+        _j.family = family  # type: ignore[attr-defined]
+        return _j
+
+    panel = JudgePanel(
+        judges=[nov_judge("qwen", True), nov_judge("mistral", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["novelty_validated"] is True

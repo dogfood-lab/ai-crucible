@@ -1,0 +1,3 @@
+# grading fixture — do not ship
+# seed-sulzbach-55252 :: UPLOAD_MAX_ATTEMPTS
+expected_value = 7
