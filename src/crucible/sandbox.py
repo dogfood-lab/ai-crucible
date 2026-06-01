@@ -111,12 +111,20 @@ def _new_process_group_kwargs() -> dict[str, object]:
 
 
 def _kill_process_tree(pid: int) -> None:
-    """Kill ``pid`` and all of its descendants, cross-platform and best-effort.
+    """Kill ``pid`` and the descendants reachable from it, cross-platform, best-effort.
 
     Idempotent and exception-suppressed: by the time we fire, the process may have
-    already exited, or a descendant may have re-parented — neither should raise out
-    of a timeout path. The goal is "no grandchild survives the timeout," achieved
-    here without a third-party dependency.
+    already exited, or a descendant may have re-parented — neither should raise out of
+    a timeout path. Reaches everything in the child's process group (POSIX ``killpg``)
+    / process tree (Windows ``taskkill /T``) — i.e. any in-group helper the command
+    forked — without a third-party dependency.
+
+    Scope limit (honest): a descendant that deliberately detaches into its OWN session
+    (``setsid`` / ``start_new_session`` / a double-fork daemon) leaves the killed group
+    and, on POSIX, cannot be reaped by a group-kill (it reparents to init on the
+    parent's death). Reaping such a process needs a PID namespace — that is the
+    hardened container/microVM provider's job, not this local provider's (see the
+    module residual-risk note). The local provider guarantees in-group teardown only.
     """
     if sys.platform == "win32":
         # taskkill /T walks the child tree from this PID and /F force-terminates

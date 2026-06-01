@@ -161,16 +161,22 @@ def test_exec_timeout_kills_grandchild_process(tmp_path: Path) -> None:
         """
     ).strip()
 
-    # Parent: spawn the grandchild (detached enough that the parent exiting/being
-    # killed does not, by itself, take the grandchild down on POSIX), then block on
-    # its own long sleep so the parent is still alive when the timeout fires.
+    # Parent: spawn a NORMAL grandchild (no new session) so it stays in the parent's
+    # process group/tree, then block on its own long sleep so the parent is still
+    # alive when the timeout fires. The timeout's group-kill (POSIX killpg) / tree-kill
+    # (Windows taskkill /T) must reap this grandchild along with the parent.
+    #
+    # We deliberately do NOT detach the grandchild into its own session: a process
+    # that setsid/start_new_session's leaves the parent's group, and on POSIX a
+    # group-kill cannot reach a new session (and a detached process reparents to init
+    # on kill). Reaping a deliberately-detached descendant is out of scope for a local
+    # subprocess provider — that's the hardened container/microVM provider's PID
+    # namespace (see sandbox.py residual-risk note). This test pins the realistic
+    # threat: a command that forks an in-group helper.
     parent_src = textwrap.dedent(
         """
         import subprocess, sys, time
-        kwargs = {}
-        if sys.platform != "win32":
-            kwargs["start_new_session"] = True  # detach grandchild from parent's group
-        subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], **kwargs)
+        subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]])
         time.sleep(30)
         """
     ).strip()
