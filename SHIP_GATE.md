@@ -58,9 +58,9 @@
 ## E. Identity (soft gate — does not block ship)
 
 - [x] `[all]` Logo in README header (2026-06-01)
-- [ ] `[all]` Translations (polyglot-mcp, 8 languages) — in progress (treatment Phase 1)
-- [ ] `[org]` Landing page (@mcptoolshop/site-theme) — in progress (treatment Phases 2–3)
-- [ ] `[all]` GitHub repo metadata: description, homepage, topics — in progress (treatment Phase 4)
+- [x] `[all]` Translations (polyglot-mcp — 7 translations ja/zh/es/fr/hi/it/pt-BR + EN source) (2026-06-01)
+- [x] `[org]` Landing page + Starlight handbook (@mcptoolshop/site-theme) (2026-06-01)
+- [x] `[all]` GitHub repo metadata: description, homepage, topics (2026-06-01)
 
 ---
 
@@ -68,4 +68,4 @@
 
 **Hard gate (A–D):** Must pass before any version is tagged or published. ✅ All A–D items are checked or SKIPped with justification.
 
-**Soft gate (E):** Should be done. Logo ✅; translations / landing page / metadata are being completed across the full-treatment phases and will be checked off as each lands.
+**Soft gate (E):** Should be done. ✅ Completed during the full treatment (logo, 7 translations, landing page + handbook, repo metadata).
