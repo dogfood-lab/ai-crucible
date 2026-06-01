@@ -70,3 +70,10 @@ jobs:
           --cov=crucible
           --cov-report=term-missing
           --cov-fail-under=${{ steps.covfloor.outputs.floor }}
+
+      - name: Dependency audit (pip-audit on runtime deps)
+        run: |
+          # Ship Gate D: ecosystem-appropriate dependency scanning. Audit the
+          # resolved RUNTIME deps from the lockfile (not dev/stats tooling).
+          uv export --format requirements-txt --no-emit-project --no-hashes > requirements-audit.txt
+          uvx pip-audit -r requirements-audit.txt

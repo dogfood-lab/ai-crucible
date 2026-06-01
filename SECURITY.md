@@ -114,9 +114,9 @@ its own consumption.
 
 ## Supported versions
 
-Crucible is pre-1.0 and pre-public (Phase 1 build in progress). Only the current
-`main` / active build branch receives security fixes. There is no back-port
-guarantee for tagged pre-releases.
+Crucible is pre-1.0 and public as of the Phase-1 milestone (v0.2.0). Only the
+current `main` / active build branch receives security fixes. There is no
+back-port guarantee for tagged pre-releases.
 
 | Version | Supported |
 | ------- | --------- |
