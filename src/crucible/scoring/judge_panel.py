@@ -22,6 +22,18 @@ family", never excluded — an untagged judge is assumed external).
 Aggregation is a reducer (PoLL pattern): ``"majority"`` vote for boolean/discrete
 verdicts, ``"median"`` for numeric scores (median is the robust central estimate
 that resists a single outlier judge — the reason a panel beats one judge).
+
+**Novelty adjudication (§8.7).** The panel is *the authority* on whether a Solver's
+claimed novel path is a legitimate alternative or a disguised bypass — novelty
+validation needs distributional perspective from outside the Solver's family (PoLL
+applied to a different question). A judge expresses its per-judge novelty verdict as
+``novelty_validated: bool`` in its returned :class:`~crucible.types.Score.metadata`;
+:func:`reduce_scores` aggregates those votes (majority of *cast* votes) into a panel
+``novelty_validated`` verdict on the panel score. The kernel feeds THAT verdict into
+the oracle gate — the oracle_runner's self-reported ``novelty_validated`` is never
+trusted for the gate. Phase 1 uses *injected* judges (so the wiring is testable
+without a model runtime); real cross-family panels (Qwen + Mistral + Command-R via
+ollama-intern + RTX 5090) plug into the same shape at Phase 2 with no kernel change.
 """
 
 from __future__ import annotations
@@ -52,6 +64,34 @@ def judge_family(judge: JudgeFn) -> str | None:
     return getattr(judge, "family", None)
 
 
+def _aggregate_novelty(scores: list[Score]) -> dict[str, object]:
+    """Aggregate per-judge ``novelty_validated`` votes into a panel verdict (§8.7).
+
+    Each judge MAY carry ``novelty_validated: bool`` in its ``Score.metadata`` (its
+    vote on whether the Solver's claimed novel path is a legitimate alternative or a
+    disguised bypass — §8.7). Judges that omit the key abstain and cast no vote.
+
+    Returns a dict with:
+
+    * ``novelty_votes`` — the list of cast votes (in judge order), for auditability.
+    * ``novelty_validated`` — the panel verdict: ``True`` iff a strict majority of
+      *cast* votes are ``True``. With no cast votes it is ``False`` — a missing
+      adjudication is never a validation (the gate must not open on silence, §8.3).
+
+    Why majority of *cast* votes rather than of the whole panel: an abstaining judge
+    expresses no opinion; counting it as a "no" would let one silent panelist veto a
+    unanimous pair. Majority-of-voters matches the PoLL spirit (the panel decides
+    among those who ruled) while still failing closed when nobody ruled.
+    """
+    votes = [
+        bool(s.metadata["novelty_validated"])
+        for s in scores
+        if "novelty_validated" in s.metadata
+    ]
+    validated = bool(votes) and sum(votes) * 2 > len(votes)
+    return {"novelty_votes": votes, "novelty_validated": validated}
+
+
 def reduce_scores(scores: list[Score], method: str) -> Score:
     """Aggregate a list of judge scores into one panel score (PoLL reducer).
 
@@ -79,6 +119,14 @@ def reduce_scores(scores: list[Score], method: str) -> Score:
         "panel_size": len(scores),
         "votes": values,
     }
+    # Aggregate the per-judge novelty verdict (§8.7). reduce_scores previously
+    # DROPPED per-judge metadata entirely; that is the H2 bug — the novelty
+    # adjudication lives in each judge's metadata and the panel is the authority,
+    # so it must be carried up. Each judge MAY carry a ``novelty_validated`` bool in
+    # its own ``Score.metadata``; an abstaining judge (no key) casts no vote. The
+    # panel verdict is the majority of the *cast* votes, defaulting to False when no
+    # judge voted (a missing vote is never a validation — conservative).
+    base_meta.update(_aggregate_novelty(scores))
 
     if method == "majority":
         # Modal vote. Bools and discrete strings/ints are all hashable; on a tie
@@ -158,7 +206,11 @@ class JudgePanel:
         Returns:
             The reduced panel :class:`~crucible.types.Score`. Its ``metadata``
             additionally records ``generator_family``, ``excluded`` (the families
-            dropped for sharing the generator family), and ``eligible_count``.
+            dropped for sharing the generator family), ``eligible_count``, and the
+            aggregated novelty verdict ``novelty_validated`` (+ the per-judge
+            ``novelty_votes``) — the panel is the novelty authority (§8.7) and the
+            kernel feeds this verdict into the oracle gate, never the Solver's or
+            oracle_runner's self-report.
 
         Raises:
             ValueError: if exclusion removes *every* judge (a panel of zero

@@ -77,10 +77,18 @@ class _ChromeGuard:
     """Context manager that proves ``state.chrome`` was not read during a turn.
 
     We cannot intercept attribute access on the shared dataclass without mutating
-    it (forbidden — ``types.py`` is locked), so we snapshot the chrome reference
-    on entry and re-assert on exit that the role did not *consume* it into the
+    it (forbidden — ``types.py`` is locked), so we snapshot the message count on
+    entry and re-assert on exit that the role did not *consume* chrome into the
     scored surface. The structural guarantee that matters — chrome is a separate
     field and never appended to ``messages`` — is asserted directly here.
+
+    The leak check **delegates to the real token-based guard**
+    (:func:`crucible.engagement.assert_no_chrome_leak`), so the roles-layer guard
+    and the kernel-layer guard have *identical strong semantics* (§10.1(e)). The
+    earlier roles-local heuristic only caught a leak when the literal word
+    ``"chrome"``/``"leaderboard"`` happened to appear in the message — it missed a
+    bare rank rendered as prose ("ranked 7 of 12") or a leaderboard solver-id, the
+    realistic leak shapes. Delegating removes that gap.
     """
 
     def __init__(self, state: AttemptState) -> None:
@@ -91,34 +99,43 @@ class _ChromeGuard:
         return self
 
     def __exit__(self, *exc: object) -> bool:
-        # Sealed-boundary assertion: nothing a role appended to the scored
-        # context this turn may carry Tier-3 chrome. We check that no new message
-        # payload echoes the live chrome object (the only way chrome could have
-        # leaked is by being serialized into a message).
+        # Sealed-boundary assertion: nothing a role appended to the scored context
+        # this turn may carry Tier-3 chrome. Only the messages added during the
+        # turn are checked (the pre-existing scored context was already guarded by
+        # the kernel before the Solver ran).
         chrome = self._state.chrome
         if chrome is not None:
-            for msg in self._state.messages[self._messages_len :]:
-                if _mentions_chrome(msg, chrome):
-                    raise ChromeAccessError(
-                        "Tier-3 chrome leaked into the scored context (§10.1(e)): "
-                        "rank/leaderboard/standings must never enter messages"
-                    )
+            new_messages = self._state.messages[self._messages_len :]
+            if new_messages and _mentions_chrome(new_messages, chrome):
+                raise ChromeAccessError(
+                    "Tier-3 chrome leaked into the scored context (§10.1(e)): "
+                    "rank/leaderboard/standings must never enter messages"
+                )
         return False
 
 
-def _mentions_chrome(message: dict[str, Any], chrome: object) -> bool:
-    """True if ``message`` appears to carry the Tier-3 chrome object/values."""
+def _mentions_chrome(messages: list[dict[str, Any]], chrome: object) -> bool:
+    """True if any of ``messages`` carries a Tier-3 chrome value.
+
+    Delegates to :func:`crucible.engagement.assert_no_chrome_leak` — the real
+    token-based guard (it flattens every populated chrome value, including
+    leaderboard rows and catalog standings, to its rendered string tokens and
+    word-boundary-matches each against message content). This is the *same* guard
+    the kernel runs, so the two layers cannot drift apart (§10.1(e)). The
+    engagement guard *raises* :class:`~crucible.engagement.SealedBoundaryViolation`
+    on a leak; here we translate that into a boolean for the role-layer
+    :class:`ChromeAccessError` contract.
+    """
+    from crucible.engagement import SealedBoundaryViolation, assert_no_chrome_leak
     from crucible.types import Chrome
 
     if not isinstance(chrome, Chrome):
         return False
-    blob = repr(message)
-    # rank / cohort_size are the load-bearing leak vectors; leaderboard entries
-    # too. If any non-None chrome signal shows up verbatim, the boundary broke.
-    for value in (chrome.rank, chrome.cohort_size):
-        if value is not None and str(value) in blob and "chrome" in blob.lower():
-            return True
-    return bool(chrome.leaderboard) and "leaderboard" in blob.lower()
+    try:
+        assert_no_chrome_leak(messages, chrome)
+    except SealedBoundaryViolation:
+        return True
+    return False
 
 
 def _next_seq(state: AttemptState) -> int:

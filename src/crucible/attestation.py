@@ -84,8 +84,34 @@ def canonical_json(obj: Any) -> str:
     canonical integer forms and we keep payload numbers integer/float-stable, so
     ``sort_keys`` + tight separators is sufficient for the JSON shapes Crucible
     writes. Documented here so a future maintainer knows the boundary.)
+
+    Non-finite floats (``NaN``, ``Infinity``, ``-Infinity``) are **not legal
+    JSON** and have no RFC-8785 representation. Python's ``json`` would otherwise
+    emit the bare tokens ``NaN``/``Infinity``, which a conformant verifier (the
+    ``@attestia/event-store`` this mirrors) rejects while Crucible's own lenient
+    ``json.loads`` accepts — a chain that silently verifies here yet no external
+    auditor can verify. We pass ``allow_nan=False`` so such a value fails LOUDLY
+    as a structured :class:`HashChainError` instead of writing an unverifiable
+    line (§9.5: the stored value is a real integrity proof, not a plausible
+    string).
     """
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    try:
+        return json.dumps(
+            obj,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except ValueError as exc:
+        # json raises ValueError ("Out of range float values are not JSON
+        # compliant") for NaN/Infinity when allow_nan=False.
+        raise _fail(
+            "INPUT_NON_FINITE_NUMBER",
+            f"cannot canonicalise a non-finite number (NaN/Infinity): {exc}",
+            "RFC 8785 / JSON has no NaN/Infinity literal; a conformant verifier "
+            "rejects such a line — sanitise the value before logging it",
+        ) from exc
 
 
 def chain_hash(prev_hash: str, entry: dict[str, Any]) -> str:
@@ -218,11 +244,13 @@ class JsonlEventStore:
                     f"line {lineno} of {self.path.name} is not valid JSON: {exc}",
                     "the log is not a well-formed hash-chained JSONL file",
                 ) from exc
-            if not isinstance(obj, dict) or not {_F_PREV, _F_PAYLOAD, _F_HASH} <= obj.keys():
+            if not isinstance(obj, dict) or obj.keys() != {_F_PREV, _F_PAYLOAD, _F_HASH}:
                 raise _fail(
                     "STATE_CHAIN_BAD_ENVELOPE",
-                    f"line {lineno} of {self.path.name} is missing chain envelope fields",
-                    f"each line needs '{_F_PREV}', '{_F_PAYLOAD}', and '{_F_HASH}'",
+                    f"line {lineno} of {self.path.name} has a malformed chain envelope",
+                    f"each line must have EXACTLY '{_F_PREV}', '{_F_PAYLOAD}', and "
+                    f"'{_F_HASH}' — no missing and no extra top-level keys (extra "
+                    "keys are unhashed and would otherwise survive verification)",
                 )
             # Link 1: prev_hash must match the running hash.
             if obj[_F_PREV] != running:

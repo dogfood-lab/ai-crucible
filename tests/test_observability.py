@@ -440,6 +440,69 @@ def test_append_after_load_continues_chain(tmp_path) -> None:
     assert store.verify_hash_chain() is True
 
 
+def test_append_rejects_non_finite_float_nan(tmp_path) -> None:
+    """M2: a payload with a NaN must fail LOUDLY at write time, not silently
+    serialize to RFC-8785-illegal ``NaN`` that a conformant verifier rejects.
+
+    RFC 8785 / JSON proper has no ``NaN``/``Infinity`` literals; the Attestia
+    ``@attestia/event-store`` this mirrors would reject such a line. Crucible's
+    lenient ``json.loads`` would *accept* it and ``verify_hash_chain`` would
+    return True — a chain that no conformant auditor can verify. So we refuse to
+    write the line at all (§9.5: the value is a real integrity proof).
+    """
+    store = JsonlEventStore(tmp_path / "log.jsonl")
+    with pytest.raises(HashChainError):
+        store.append({"type": "score", "value": float("nan")})
+    # Nothing illegal was committed to disk.
+    assert len(store) == 0
+
+
+def test_append_rejects_non_finite_float_inf(tmp_path) -> None:
+    """M2 (companion): Infinity is equally illegal RFC-8785 JSON and must raise."""
+    store = JsonlEventStore(tmp_path / "log.jsonl")
+    with pytest.raises(HashChainError):
+        store.append({"type": "penalty", "weight": float("inf")})
+    with pytest.raises(HashChainError):
+        store.append({"type": "penalty", "weight": float("-inf")})
+    assert len(store) == 0
+
+
+def test_extra_top_level_envelope_key_is_rejected(tmp_path) -> None:
+    """L1: an unhashed extra top-level envelope key must NOT survive verification.
+
+    ``hash`` only covers ``prev_hash + payload``. With the old subset key-set
+    check, an attacker who can write the file could attach extra top-level keys
+    that are never hashed yet still verify True. The envelope must be an EXACT
+    key-set so any annotation/injection is rejected.
+
+    A line carrying an unhashed extra top-level key is a *malformed envelope*,
+    not a well-formed-but-tampered chain — so verification rejects it exactly the
+    way :func:`test_verify_raises_on_malformed_envelope` rejects a line missing
+    the envelope fields: via :class:`HashChainError` (the documented contract,
+    lines 206-209 of attestation.py). Either way it does NOT verify True, which
+    is the whole point: pre-fix the subset check returned True (RED); post-fix it
+    is rejected (GREEN).
+    """
+    path = tmp_path / "log.jsonl"
+    store = JsonlEventStore(path)
+    store.append({"type": "a", "value": 1})
+    store.append({"type": "b", "value": 2})
+    assert store.verify_hash_chain() is True
+
+    # Inject an extra, unhashed top-level key into a stored line on disk.
+    lines = path.read_text(encoding="utf-8").splitlines()
+    obj = json.loads(lines[0])
+    obj["INJECTED"] = "x"  # not part of prev_hash+payload, so the hash is silent
+    lines[0] = canonical_json(obj)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # The injected line no longer survives verification. Belt-and-suspenders:
+    # whether the implementation raises (malformed-envelope contract) or returns
+    # False, it must never report the tampered chain as intact.
+    with pytest.raises(HashChainError):
+        store.verify_hash_chain()
+
+
 # --------------------------------------------------------------------------- #
 # attestation.py — cosign stub (the documented production edge)
 # --------------------------------------------------------------------------- #

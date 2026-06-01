@@ -15,7 +15,9 @@ Real tests — including the failing cases the dogfood discipline requires:
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -128,6 +130,77 @@ def test_exec_timeout_fires_and_sets_timed_out() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# exec timeout kills the whole PROCESS TREE, not just the direct child (M1)
+# --------------------------------------------------------------------------- #
+
+
+def test_exec_timeout_kills_grandchild_process(tmp_path: Path) -> None:
+    """``proc.kill()`` signals only the DIRECT child; a grandchild it spawned is
+    orphaned and survives the timeout. The fix kills the whole process group / job
+    tree, so the grandchild dies too.
+
+    Proof, not assertion: the parent spawns a grandchild that — after a sleep that
+    outlasts the timeout — writes a marker file to an absolute path OUTSIDE the
+    workdir. ``exec`` is given ~1s. If the tree is killed the marker is NEVER
+    written even after we poll well past the grandchild's sleep; if only the direct
+    child is killed (the bug) the orphaned grandchild wakes up and writes it.
+    """
+    marker = tmp_path / "grandchild-marker.txt"
+    assert not marker.exists()
+
+    # Grandchild: sleep past the timeout, then write the marker. Absolute path via
+    # argv so detection never depends on cwd. Flush + close so the write is durable
+    # the instant it happens.
+    grandchild_src = textwrap.dedent(
+        """
+        import sys, time
+        time.sleep(8)
+        with open(sys.argv[1], "w", encoding="utf-8") as f:
+            f.write("grandchild-survived")
+            f.flush()
+        """
+    ).strip()
+
+    # Parent: spawn the grandchild (detached enough that the parent exiting/being
+    # killed does not, by itself, take the grandchild down on POSIX), then block on
+    # its own long sleep so the parent is still alive when the timeout fires.
+    parent_src = textwrap.dedent(
+        """
+        import subprocess, sys, time
+        kwargs = {}
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True  # detach grandchild from parent's group
+        subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2]], **kwargs)
+        time.sleep(30)
+        """
+    ).strip()
+
+    async def scenario() -> ExecResult:
+        async with LocalSandbox() as box:
+            return await box.exec(
+                [PY, "-c", parent_src, grandchild_src, str(marker)],
+                timeout=1.0,
+            )
+
+    res = asyncio.run(scenario())
+    assert res.timed_out is True
+    assert res.returncode == -1
+
+    # Poll well past the grandchild's 8s sleep. If the tree-kill worked the marker
+    # never appears; if the grandchild was orphaned it writes around t+8s.
+    deadline = time.monotonic() + 14
+    while time.monotonic() < deadline:
+        if marker.exists():
+            break
+        time.sleep(0.2)
+
+    assert not marker.exists(), (
+        "grandchild SURVIVED the timeout and wrote its marker — the process tree "
+        "was not killed (only the direct child was)"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # read_file / write_file roundtrip + confinement
 # --------------------------------------------------------------------------- #
 
@@ -172,6 +245,67 @@ def test_read_file_rejects_absolute_path_outside(tmp_path: Path) -> None:
 
     with pytest.raises(PermissionError):
         asyncio.run(scenario())
+
+
+def _make_symlink_or_skip(link: Path, target: Path) -> None:
+    """Create ``link`` -> ``target`` or :func:`pytest.skip` if the runner can't.
+
+    On Windows, symlink creation needs SeCreateSymbolicLinkPrivilege (Developer
+    Mode or admin); without it ``os.symlink`` raises ``OSError`` (WinError 1314).
+    Linux CI can always create symlinks, so the test still runs there at minimum.
+    """
+    try:
+        os.symlink(target, link)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - env-dependent
+        pytest.skip(f"cannot create symlinks on this runner: {exc}")
+    if not link.is_symlink():  # pragma: no cover - defensive
+        pytest.skip("symlink creation did not produce a symlink on this runner")
+
+
+def test_read_file_rejects_symlink_escape(tmp_path: Path) -> None:
+    """A symlink INSIDE the workdir that points to a secret OUTSIDE it must not be
+    a read hole. ``_resolve_within`` follows the link via ``Path.resolve()`` and
+    containment-checks the *real* target, so the escape is rejected.
+
+    M3: symlink escapes were defended-by-construction but untested. This proves it.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text("SECRET-OUTSIDE-WORKDIR", encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+
+    # A symlink living inside the workdir, pointing at the out-of-workdir secret.
+    link = work / "escape_link.txt"
+    _make_symlink_or_skip(link, secret)
+
+    box = LocalSandbox(root=work)
+    try:
+        with pytest.raises(PermissionError):
+            asyncio.run(box.read_file("escape_link.txt"))
+    finally:
+        box.cleanup()
+
+
+def test_write_file_rejects_symlink_escape(tmp_path: Path) -> None:
+    """A symlink inside the workdir pointing to a directory OUTSIDE it must not let
+    ``write_file`` plant a file outside the sandbox."""
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+
+    # Symlinked directory inside the workdir -> a directory outside it.
+    link_dir = work / "escape_dir"
+    _make_symlink_or_skip(link_dir, outside_dir)
+
+    box = LocalSandbox(root=work)
+    try:
+        with pytest.raises(PermissionError):
+            asyncio.run(box.write_file("escape_dir/planted.txt", "should not land"))
+        # And nothing was actually written outside the sandbox.
+        assert not (outside_dir / "planted.txt").exists()
+    finally:
+        box.cleanup()
 
 
 # --------------------------------------------------------------------------- #

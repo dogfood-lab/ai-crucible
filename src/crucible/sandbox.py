@@ -66,6 +66,9 @@ import asyncio
 import contextlib
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +84,57 @@ __all__ = [
     "LocalSandbox",
     "copy_workdir_out",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# Cross-platform process-tree teardown for `exec` timeouts.
+#
+# `proc.kill()` signals only the direct child; a grandchild it spawned is orphaned
+# and survives the timeout. To kill the whole tree we spawn the child in its own
+# process group / new console group, then on timeout kill that group (POSIX) or use
+# `taskkill /T` to walk the tree (Windows).
+# --------------------------------------------------------------------------- #
+
+
+def _new_process_group_kwargs() -> dict[str, object]:
+    """Spawn kwargs that put the child at the head of a fresh, killable group.
+
+    - POSIX: ``start_new_session=True`` runs ``setsid`` so the child is the leader
+      of a new session+process group; its descendants share that group id and a
+      single ``killpg`` reaps them all.
+    - Windows: ``CREATE_NEW_PROCESS_GROUP`` isolates the child so killing it (and,
+      via ``taskkill /T``, its tree) doesn't touch the test runner's own group.
+    """
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kill ``pid`` and all of its descendants, cross-platform and best-effort.
+
+    Idempotent and exception-suppressed: by the time we fire, the process may have
+    already exited, or a descendant may have re-parented — neither should raise out
+    of a timeout path. The goal is "no grandchild survives the timeout," achieved
+    here without a third-party dependency.
+    """
+    if sys.platform == "win32":
+        # taskkill /T walks the child tree from this PID and /F force-terminates
+        # each. It's built into Windows (no pywin32/ctypes Job Object plumbing) and
+        # reliably reaps grandchildren. Swallow output and any failure (e.g. the
+        # process already gone -> non-zero exit).
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        return
+    # POSIX: kill the whole process group the child leads (negative pgid). SIGKILL
+    # is uncatchable, guaranteeing the grandchild can't linger.
+    with contextlib.suppress(Exception):
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
 
 
 @dataclass
@@ -109,9 +163,13 @@ class SandboxEnvironment(Protocol):
     """
 
     async def exec(self, cmd: list[str], timeout: float) -> ExecResult:
-        """Run ``cmd`` (argv list, no shell) confined to the working directory,
-        killing it and returning ``timed_out=True`` if it exceeds ``timeout``
-        seconds. Output is captured with a size cap."""
+        """Run ``cmd`` (argv list, no shell) confined to the working directory.
+
+        On exceeding ``timeout`` seconds the whole **process tree** is killed —
+        the command and any grandchildren it spawned, not just the direct child —
+        and ``timed_out=True`` is returned. Output is captured with a size cap.
+        This is process isolation, not a security sandbox (see the module
+        docstring's residual-risk note)."""
         ...
 
     async def read_file(self, path: str) -> str:
@@ -132,7 +190,11 @@ class LocalSandbox:
 
     - ``exec`` runs via :func:`asyncio.create_subprocess_exec` (argv, **no shell**),
       ``cwd`` pinned to the workdir, wrapped in :func:`asyncio.wait_for` for the
-      timeout, with per-stream output caps.
+      timeout, with per-stream output caps. The child is spawned at the head of its
+      own process group (POSIX ``setsid`` / Windows ``CREATE_NEW_PROCESS_GROUP``)
+      so a timeout kills the **whole process tree** — the command and any
+      grandchildren it spawned — rather than orphaning grandchildren. This is
+      process isolation, not a security sandbox (module docstring residual risk).
     - ``read_file`` / ``write_file`` resolve the requested path against the workdir
       and reject anything that escapes it (``..`` traversal, absolute paths, symlink
       targets pointing outside).
@@ -199,19 +261,25 @@ class LocalSandbox:
     async def exec(self, cmd: list[str], timeout: float) -> ExecResult:
         if not cmd:
             raise ValueError("exec requires a non-empty argv list")
+        # Spawn the child as the leader of its own process group (POSIX) / new
+        # process group (Windows) so that on timeout we can kill the WHOLE tree —
+        # the child AND any grandchildren it spawned — not just the direct child.
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=str(self._root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_new_process_group_kwargs(),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
             # Wall-clock budget exhausted (asyncio.TimeoutError is an alias for the
-            # builtin on 3.11+). Kill the process, reap it, and report timed_out
-            # kernel-side (never command-self-reported).
-            proc.kill()
+            # builtin on 3.11+). Kill the whole process TREE, reap the direct child,
+            # and report timed_out kernel-side (never command-self-reported). A bare
+            # proc.kill() would signal only the direct child and orphan any
+            # grandchildren, which would survive the timeout.
+            _kill_process_tree(proc.pid)
             with contextlib.suppress(Exception):
                 await proc.communicate()
             return ExecResult(returncode=-1, stdout="", stderr="", timed_out=True)

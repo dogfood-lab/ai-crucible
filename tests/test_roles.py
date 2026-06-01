@@ -223,9 +223,9 @@ def test_chrome_present_but_not_leaked_is_fine() -> None:
     assert out.messages == []
 
 
-def test_leaking_chrome_into_messages_goes_red() -> None:
-    """RED path: a (mis)behaving role that serializes Tier-3 chrome into the
-    scored context must be caught by the guard (§10.1(e))."""
+def _leaking_role(content: str):
+    """A (mis)behaving role that serializes ``content`` into the scored messages
+    under the :class:`_ChromeGuard`. Used to drive the RED prose-leak paths."""
 
     class LeakyRole:
         name = RoleName.SOLVER
@@ -234,16 +234,56 @@ def test_leaking_chrome_into_messages_goes_red() -> None:
             from crucible.roles import _ChromeGuard
 
             with _ChromeGuard(state):
-                # Violation: copy rank from chrome into the scored messages.
-                state.messages.append(
-                    {"role": "user", "chrome_rank": state.chrome.rank}  # type: ignore[union-attr]
-                )
+                # Violation: pull a Tier-3 chrome VALUE into the scored context as
+                # natural prose — the realistic leak shape, not a labeled key.
+                state.messages.append({"role": "user", "content": content})
             return state
 
+    return LeakyRole()
+
+
+def test_prose_rank_leak_into_messages_goes_red() -> None:
+    """RED path: a role that writes the rank as PROSE ("ranked 7 of 12 on the
+    leaderboard") leaks Tier-3 chrome into the scored context and must be caught.
+
+    This is the leak the OLD ``chrome_rank``-keyed test could not see: there is no
+    literal ``"chrome"`` token here, so the previous weak guard passed it. The
+    guard now delegates to :func:`crucible.engagement.assert_no_chrome_leak`, whose
+    token-based match catches the bare rank value however it is phrased (§10.1(e))."""
     state = _attempt()
     state.chrome = Chrome(rank=7, cohort_size=12)
     with pytest.raises(ChromeAccessError):
-        anyio.run(LeakyRole().act, state)
+        anyio.run(_leaking_role("You are ranked 7 of 12 on the leaderboard.").act, state)
+
+
+def test_prose_solver_id_leak_into_messages_goes_red() -> None:
+    """RED path: a leaderboard solver-id leaked in ``content`` (no literal
+    ``"leaderboard"`` word, no ``"chrome"`` token) must be caught.
+
+    The old weak guard's leaderboard branch only fired on the literal word
+    ""leaderboard"" appearing in the message; a bare solver-id slipped through. The
+    delegated token-based guard catches the actual leaked value (§10.1(e))."""
+    state = _attempt()
+    state.chrome = Chrome(
+        rank=3,
+        cohort_size=12,
+        leaderboard=[{"solver": "solver-zeta", "score": 99}],
+    )
+    with pytest.raises(ChromeAccessError):
+        anyio.run(
+            _leaking_role("The current best solution is from solver-zeta.").act, state
+        )
+
+
+def test_clean_prose_does_not_trip_chrome_guard() -> None:
+    """A role that writes only task prose (no chrome value) passes the guard — the
+    delegated guard must not be a false-positive machine (it only fires on a real
+    populated chrome value, §10.1(e))."""
+    state = _attempt()
+    state.chrome = Chrome(rank=7, cohort_size=12, leaderboard=[{"solver": "solver-zeta"}])
+    role = _leaking_role("Read config.py and report MAX_RETRIES to the user.")
+    out = anyio.run(role.act, state)  # must NOT raise
+    assert out.messages[-1]["content"].startswith("Read config.py")
 
 
 # --------------------------------------------------------------------------- #

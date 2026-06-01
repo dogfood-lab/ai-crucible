@@ -22,16 +22,25 @@ The pipeline (research-grounding §10.2, composed top-to-bottom):
    :class:`crucible.sandbox.SandboxEnvironment`. The Solver routes all model I/O
    through the injected ``generate`` choke point; the kernel — never the model —
    records every model/tool call as a :class:`TraceEvent` and stamps
-   ``terminated_by`` from any :class:`BudgetExceeded` (ANDON).
-4. **Grade out-of-band** (§10.4): after the Solver halts, the injected
-   ``oracle_runner`` (which represents the separate grading host reading the sealed
-   oracle against the copied workdir) yields an :class:`OracleOutcome`; the kernel
-   passes it to :func:`crucible.scoring.oracle.grade` → ``attempt.scores["oracle"]``.
-   The kernel itself never reads the oracle into the Solver context.
-5. **Panel** (optional, EXTERNAL_VERIFIER §10.2): if ``judges`` are supplied, run
-   :class:`crucible.scoring.judge_panel.JudgePanel` (generator family excluded) →
-   ``attempt.scores["panel"]``. If ``enable_critic`` (default OFF, §10.3), invoke
-   the :class:`crucible.roles.Critic`.
+   ``terminated_by`` from any :class:`BudgetExceeded` (ANDON). The wall-clock
+   budget is enforced LIVE (§8.4): the kernel reads ``time_source`` per Solver turn
+   *and* at the attempt boundary, calling :meth:`BudgetGovernor.check_time`, so a
+   time overrun halts with ``terminated_by == TIME`` rather than only being flagged
+   post-hoc by the oracle.
+4. **Grade out-of-band** (§10.4) with **panel-adjudicated novelty** (§8.7): after
+   the Solver halts, the injected ``oracle_runner`` (the separate grading host
+   reading the sealed oracle against the copied workdir) yields an
+   :class:`OracleOutcome` (authoritative for solve / regression / penalties /
+   budgets). When ``novelty`` is *claimed*, the cross-family panel rules FIRST and
+   ITS verdict — not the oracle_runner's self-report — is fed into
+   ``outcome.novelty_validated`` before :func:`crucible.scoring.oracle.grade` →
+   ``attempt.scores["oracle"]``. The panel is the novelty authority; absent a panel
+   an unvalidatable claim never validates. The kernel never reads the oracle itself.
+5. **Panel score** (optional, EXTERNAL_VERIFIER §10.2): if ``judges`` are supplied,
+   the :class:`crucible.scoring.judge_panel.JudgePanel` (generator family excluded)
+   score computed in step 4 is recorded as ``attempt.scores["panel"]`` (it carries
+   the aggregated ``novelty_validated`` verdict). If ``enable_critic`` (default OFF,
+   §10.3), invoke the :class:`crucible.roles.Critic`.
 6. **Write the trace** (:meth:`TraceWriter.to_eval_log`) and optionally append the
    eval-log to a :class:`crucible.attestation.JsonlEventStore`.
 
@@ -42,10 +51,12 @@ Standards compliance (the six — workflow-standards.md):
   puzzle artifact; the framing/oracle/panel sub-steps are themselves replayable
   (each Wave-1 module scored 3 here). Pinning the *model* + image digest is the
   provider's job (the local ``generate``/Docker provider waves).
-- **ANDON_AUTHORITY — 3:** the kernel is the andon authority — a budget/time/
+- **ANDON_AUTHORITY — 3:** the kernel is the andon authority — a tool-budget,
+  LIVE wall-clock (``check_time`` per turn + at the boundary, §8.4 / H3), or
   hard-kill breach halts the attempt with the right ``terminated_by`` (via the
-  governor), and :func:`assert_no_chrome_leak` halts BEFORE any model call on a
-  sealed-boundary violation. Both are proven RED in ``tests/test_kernel.py``.
+  governor), and :func:`assert_no_chrome_leak` halts BEFORE the Solver AND re-runs
+  AFTER the Solver/Critic turns on a sealed-boundary violation. All are proven in
+  ``tests/test_kernel.py`` (BUDGET, TIME, HARD_KILL, and post-turn chrome leak).
 - **NAMED_COMPENSATORS — 2:** the only irreversible local action the kernel takes
   is creating a sandbox workdir / event-log file; both are owned and torn down by
   their modules (:meth:`LocalSandbox.cleanup`, append-only ``JsonlEventStore``).
@@ -59,7 +70,10 @@ Standards compliance (the six — workflow-standards.md):
 - **EXTERNAL_VERIFIER — 3:** grading is out-of-band (the injected ``oracle_runner``
   reading a sealed oracle the kernel never loads), and the judge panel is a
   different model family with the generator's reasoning hidden (the kernel passes
-  ``generator_family`` so same-family judges are excluded structurally).
+  ``generator_family`` so same-family judges are excluded structurally). Novelty —
+  the one capability claim the Solver could otherwise self-certify — is adjudicated
+  by that cross-family panel BEFORE the gate; the oracle_runner's self-reported
+  ``novelty_validated`` is never trusted for the gate (H2, §8.7).
 """
 
 from __future__ import annotations
@@ -147,7 +161,14 @@ def _new_attempt(
     )
 
 
-def _wrap_generate(generate: GenerateFn, solver: Solver) -> GenerateFn:
+def _wrap_generate(
+    generate: GenerateFn,
+    solver: Solver,
+    *,
+    governor: BudgetGovernor | None = None,
+    time_source: Callable[[], float] | None = None,
+    start: float = 0.0,
+) -> GenerateFn:
     """Park the live Solver on the attempt so ``generate`` can record tool calls.
 
     The role contract keeps ``generate`` as ``(AttemptState) -> Awaitable[str]`` so
@@ -158,10 +179,22 @@ def _wrap_generate(generate: GenerateFn, solver: Solver) -> GenerateFn:
     injected ``generate`` may then ``await state.metadata[_SOLVER_HANDLE].record_tool_call(...)``
     — and a budget/hard-kill breach raised there propagates into
     :meth:`Solver.act`, which stamps ``terminated_by`` (ANDON at the boundary).
+
+    **Live time budget (H3, §8.4).** When ``governor`` + ``time_source`` are given,
+    the wrapper calls :meth:`BudgetGovernor.check_time` *per turn* (before handing
+    off to the model) with ``time_source() - start``. A wall-clock overrun therefore
+    raises ``BudgetExceeded(TIME)`` from *inside* :meth:`Solver.act` — caught there
+    and stamped onto ``terminated_by`` — so a long-running attempt is halted LIVE,
+    not merely flagged after the fact by the oracle. The check is kernel-side; the
+    model never reports its own elapsed time (Vivaria, §10.2). The Critic turn wires
+    its own ``generate`` without these, so only the Solver block is time-governed
+    (the budget is scoped to the Solver block, §10.2).
     """
 
     async def _wrapped(state: AttemptState) -> str:
         state.metadata[_SOLVER_HANDLE] = solver
+        if governor is not None and time_source is not None:
+            governor.check_time(time_source() - start)
         return await generate(state)
 
     return _wrapped
@@ -181,6 +214,7 @@ async def run_attempt(
     panel_reducer: str = "majority",
     generator_family: str | None = None,
     event_store: object | None = None,
+    time_source: Callable[[], float] = time.monotonic,
 ) -> AttemptState:
     """Run one Solver attempt end-to-end and return the populated attempt.
 
@@ -192,11 +226,14 @@ async def run_attempt(
        context BEFORE the Solver runs (:func:`assert_no_chrome_leak`, fail-closed).
     3. Run the :class:`Solver` inside a :class:`BudgetGovernor` (and ``sandbox`` if
        given), recording every model/tool call as a :class:`TraceEvent`. A
-       :class:`BudgetExceeded` stamps ``terminated_by``.
-    4. Grade out-of-band: ``oracle_runner`` → :class:`OracleOutcome` →
-       :func:`crucible.scoring.oracle.grade` → ``attempt.scores["oracle"]``.
-    5. If ``judges`` given: :class:`JudgePanel` (generator family excluded) →
-       ``attempt.scores["panel"]``. If ``enable_critic``: invoke the Critic.
+       :class:`BudgetExceeded` (tool / LIVE wall-clock / hard-kill) stamps
+       ``terminated_by``; re-assert the chrome boundary after the Solver turn.
+    4. Grade out-of-band: ``oracle_runner`` → :class:`OracleOutcome`; when novelty is
+       claimed, the :class:`JudgePanel` rules first and its verdict overrides
+       ``outcome.novelty_validated`` (§8.7) → :func:`crucible.scoring.oracle.grade`
+       → ``attempt.scores["oracle"]``.
+    5. Record the panel score (generator family excluded) → ``attempt.scores["panel"]``.
+       If ``enable_critic``: invoke the Critic and re-assert the chrome boundary.
     6. Write the Inspect-shaped eval-log and optionally append it to ``event_store``.
 
     Args:
@@ -210,7 +247,10 @@ async def run_attempt(
             self-referential; §10.1(f)).
         sandbox: the Solver's narrow env channel (§10.4); ``None`` runs with no env
             (a pure-reasoning puzzle / a fake-tool test).
-        judges: cross-family judges for the panel; ``None`` skips the panel.
+        judges: cross-family judges for the panel; ``None`` skips the panel. When a
+            novelty bonus is claimed, the panel is the validation authority (§8.7) —
+            each judge may carry a ``novelty_validated`` vote in its score metadata,
+            aggregated into the panel verdict that drives the oracle gate.
         enable_critic: opt the default-OFF Critic in for this attempt (§10.3).
         chrome: Tier-3 chrome held on the attempt for the human UI; guarded out of
             the scored context.
@@ -219,6 +259,12 @@ async def run_attempt(
             same-family judges (EXTERNAL_VERIFIER, §10.2).
         event_store: optional :class:`crucible.attestation.JsonlEventStore`; when
             given, the rendered eval-log is appended for durable provenance (§9.5).
+        time_source: monotonic clock the kernel reads for the live time-budget
+            check (§8.4 / H3); defaults to :func:`time.monotonic`. Injected so the
+            time enforcement is deterministically testable (a fake clock) without
+            real sleeps. Read once at attempt start, then per Solver turn and once
+            at the attempt boundary — a reading past ``time_budget_seconds`` halts
+            the attempt with ``terminated_by == TIME``.
 
     Returns:
         The populated :class:`AttemptState` — ``messages`` (scored context, never
@@ -246,14 +292,44 @@ async def run_attempt(
     # resolve the chicken/egg by constructing with a sentinel, then assigning the
     # real wrapped generate onto the Solver's choke point.
     solver = Solver(_sentinel_generate(), _sandbox_tools(sandbox), governor)
-    solver._generate = _wrap_generate(generate, solver)  # type: ignore[attr-defined]
+    # Capture the wall-clock start BEFORE wiring generate so the per-turn live time
+    # check (§8.4 / H3) measures from the true attempt start.
+    start = time_source()
+    solver._generate = _wrap_generate(  # type: ignore[attr-defined]
+        generate, solver, governor=governor, time_source=time_source, start=start
+    )
 
-    start = time.monotonic()
     try:
         attempt = await solver.act(attempt)
+        # Attempt-boundary time check (§8.4 / H3): even if every turn read under
+        # budget, the *total* elapsed may have overrun. Re-check at the boundary and
+        # stamp TIME over a clean COMPLETED so a wall-clock overrun never escapes as
+        # a success. A budget exception already stamped by the Solver is left as-is.
+        if attempt.terminated_by in (None, TerminatedBy.COMPLETED):
+            try:
+                governor.check_time(time_source() - start)
+            except BudgetExceeded as exc:
+                attempt.terminated_by = exc.terminated_by
+                attempt.error = str(exc)
+                attempt.events.append(
+                    TraceEvent(
+                        kind="error",
+                        payload={"terminated_by": exc.terminated_by.value,
+                                 "message": str(exc)},
+                        seq=len(attempt.events),
+                    )
+                )
     finally:
-        attempt.wall_time = time.monotonic() - start
+        attempt.wall_time = time_source() - start
         attempt.metadata.pop(_SOLVER_HANDLE, None)  # don't leak the handle downstream
+
+    # Sealed-boundary re-check AFTER the Solver turn (H1, §10.1(e)). The pre-Solver
+    # guard covers the *initial* scored context, but the Solver turn is a
+    # message-mutating site — it (or its injected generate) may add or edit messages
+    # — so the andon must re-fire over the full context. This catches leaks the
+    # per-turn role guard misses (e.g. an in-place edit of an existing message,
+    # which is outside the role guard's appended-slice view).
+    _assert_no_chrome_leak_if_present(attempt)
 
     # Mirror the role-recorded events into the kernel-owned writer (the writer owns
     # canonical seq numbering + attachment spilling, §10.2 finding 5). The Solver
@@ -263,29 +339,50 @@ async def run_attempt(
     # direct score-event appends below.
     mirrored = _mirror_events(writer, attempt, since=0)
 
-    # -- 4. Out-of-band oracle grading (§10.4). ------------------------------- #
+    # -- 4. Out-of-band oracle grading (§10.4) with PANEL-adjudicated novelty. - #
+    # Order matters (H2, §8.7): the cross-family panel is the novelty authority, so
+    # it must rule BEFORE the gate is computed and ITS verdict — never the
+    # oracle_runner's self-report — decides whether the novelty bonus applies. We
+    # therefore: (a) get the task verdict from the oracle_runner (solve / regression
+    # / penalties / budgets stay authoritative from it); (b) run the panel; (c)
+    # OVERRIDE outcome.novelty_validated with the panel verdict; (d) grade.
     outcome = await oracle_runner(attempt, meta)
+
+    panel_score: Score | None = None
+    if judges:
+        panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
+        panel_score = await panel.score(attempt)
+
+    # The oracle_runner is NOT trusted for novelty validation. With a panel, the
+    # panel's aggregated verdict governs; without a panel, an unvalidatable claim is
+    # never validated (you don't get to assert your own bonus, §8.3/§8.7). Solve and
+    # all other gate dimensions remain as the oracle_runner reported them.
+    if outcome.novelty_claimed:
+        outcome.novelty_validated = bool(
+            panel_score.metadata.get("novelty_validated")
+        ) if panel_score is not None else False
+
     attempt.scores["oracle"] = grade(attempt, meta, outcome)
     writer.append(
         TraceEvent(kind="score", payload={"scorer": "oracle",
                                           "value": attempt.scores["oracle"].value})
     )
 
-    # -- 5. Cross-family judge panel (EXTERNAL_VERIFIER, §10.2) + opt-in Critic. #
-    if judges:
-        panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
-        attempt.scores["panel"] = await panel.score(attempt)
+    # -- 5. Record the panel score (EXTERNAL_VERIFIER, §10.2) + opt-in Critic. -- #
+    if panel_score is not None:
+        attempt.scores["panel"] = panel_score
         writer.append(
             TraceEvent(kind="score", payload={"scorer": "panel",
-                                              "value": attempt.scores["panel"].value})
+                                              "value": panel_score.value})
         )
-        # Propagate panel-validated novelty onto the oracle score so the rollups
-        # (observability._is_novel) see a single validated flag, not a self-claim.
-        _propagate_novelty(attempt)
 
     if enable_critic:
         critic = Critic(_wrap_generate(generate, solver), enabled=True)
         attempt = await critic.act(attempt)
+        # Sealed-boundary re-check AFTER the Critic turn (H1, §10.1(e)). The Critic
+        # appends/edits messages (string-in/string-out), so it is another
+        # message-mutating site the andon must cover with the same strong guard.
+        _assert_no_chrome_leak_if_present(attempt)
         mirrored = _mirror_events(writer, attempt, since=mirrored)
 
     # -- 6. Render the Inspect-shaped eval-log + optional durable append (§9.5). #
@@ -407,21 +504,20 @@ def _mirror_events(writer: TraceWriter, attempt: AttemptState, *, since: int) ->
     return len(attempt.events)
 
 
-def _propagate_novelty(attempt: AttemptState) -> None:
-    """Stamp panel-validated novelty onto the oracle score metadata.
+def _assert_no_chrome_leak_if_present(attempt: AttemptState) -> None:
+    """Re-run the sealed-boundary andon over the FULL scored context (H1, §10.1(e)).
 
-    Novelty is panel-adjudicated, never Solver-self-asserted (§8.7). When the panel
-    validated a novel path, the rollup layer (:func:`crucible.observability._is_novel`)
-    looks for a ``novelty_validated`` truthy marker on the oracle/panel score. The
-    panel score already carries its own metadata; here we copy the validated flag
-    onto the oracle score so a single source records it for the leaderboard.
+    A no-op when the attempt carries no Tier-3 chrome (nothing can leak). Otherwise
+    it re-runs :func:`crucible.engagement.assert_no_chrome_leak` over every message
+    so the kernel — the andon authority — asserts the boundary held after each
+    message-mutating turn (Solver, Critic). This is broader than any per-turn role
+    guard, which only inspects the messages *appended* during its own turn; an
+    in-place edit of an existing message, or any path that bypasses a role guard,
+    is still caught here. Raises :class:`~crucible.engagement.SealedBoundaryViolation`
+    on a leak (never swallowed — a contaminated attempt must halt, not be graded).
     """
-    panel = attempt.scores.get("panel")
-    oracle = attempt.scores.get("oracle")
-    if panel is None or oracle is None:
-        return
-    if panel.metadata.get("novelty_validated"):
-        oracle.metadata["novelty_validated"] = True
+    if attempt.chrome is not None:
+        assert_no_chrome_leak(attempt.messages, attempt.chrome)
 
 
 # -- Solver-construction shims (keep the public generate signature stable) ---- #

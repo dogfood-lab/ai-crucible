@@ -620,3 +620,85 @@ def test_reduce_unknown_method_raises() -> None:
 def test_reduce_median_on_non_numeric_raises() -> None:
     with pytest.raises(ValueError, match="numeric"):
         reduce_scores([Score(value="legit"), Score(value="nope")], "median")
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — per-judge novelty metadata is AGGREGATED, not dropped (H2, §8.7)
+# --------------------------------------------------------------------------- #
+
+
+def test_reduce_aggregates_novelty_validated_majority_true() -> None:
+    """reduce_scores must aggregate each judge's novelty_validated vote (majority)
+    onto the panel score — it previously DROPPED per-judge metadata (H2, §8.7)."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True, metadata={"novelty_validated": False}),
+        ],
+        "majority",
+    )
+    # 2 of 3 judges validated novelty → panel verdict True.
+    assert out.metadata["novelty_validated"] is True
+    # The per-judge votes are preserved for auditability.
+    assert out.metadata["novelty_votes"] == [True, True, False]
+
+
+def test_reduce_aggregates_novelty_validated_majority_false() -> None:
+    """Majority of judges reject novelty → panel novelty_validated is False."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": False}),
+            Score(value=True, metadata={"novelty_validated": False}),
+            Score(value=True, metadata={"novelty_validated": True}),
+        ],
+        "majority",
+    )
+    assert out.metadata["novelty_validated"] is False
+    assert out.metadata["novelty_votes"] == [False, False, True]
+
+
+def test_reduce_novelty_absent_when_no_judge_votes() -> None:
+    """When no judge carries a novelty vote, the panel records novelty_validated
+    False (a missing vote is not a validation — conservative, §8.7)."""
+    out = reduce_scores([Score(value=True), Score(value=False)], "majority")
+    assert out.metadata["novelty_validated"] is False
+    # Judges with no vote contribute no novelty_votes entries.
+    assert out.metadata["novelty_votes"] == []
+
+
+def test_reduce_novelty_missing_vote_counts_as_not_validated() -> None:
+    """A judge that abstains (no novelty_validated key) does not count toward
+    validation; only explicit True votes can carry the majority (§8.7)."""
+    out = reduce_scores(
+        [
+            Score(value=True, metadata={"novelty_validated": True}),
+            Score(value=True),  # abstains
+        ],
+        "majority",
+    )
+    # 1 explicit True vote of 1 cast vote → majority True among voters.
+    assert out.metadata["novelty_votes"] == [True]
+    assert out.metadata["novelty_validated"] is True
+
+
+def test_panel_surfaces_novelty_validated_verdict(
+    scoring_attempt: AttemptState,
+) -> None:
+    """The JudgePanel surfaces an aggregated novelty_validated verdict in its score
+    metadata (the kernel feeds this into the oracle gate, H2/§8.7)."""
+
+    def nov_judge(family: str, vote: bool) -> JudgeFn:
+        async def _j(_a: AttemptState) -> Score:
+            return Score(value=True, metadata={"novelty_validated": vote})
+
+        _j.family = family  # type: ignore[attr-defined]
+        return _j
+
+    panel = JudgePanel(
+        judges=[nov_judge("qwen", True), nov_judge("mistral", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["novelty_validated"] is True

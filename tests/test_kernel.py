@@ -15,8 +15,13 @@ Invariants proven (happy path + the RED paths the spec requires):
   ``scores["oracle"]``, a populated trace, and ``terminated_by == COMPLETED``.
 - A looping fake ``generate`` (3 identical tool calls) trips the kernel-side
   hard-kill ANDON → ``terminated_by == HARD_KILL``.
+- A fake ``generate`` exceeding the TOOL budget (distinct calls) → ``terminated_by
+  == BUDGET`` (M3); a fake clock past the time budget → ``terminated_by == TIME``
+  via the LIVE kernel-side ``check_time`` (H3 / M3).
 - A chrome leak (a chrome value present in the scored context) raises
-  :class:`SealedBoundaryViolation` BEFORE the Solver runs (RED, §10.1(e)).
+  :class:`SealedBoundaryViolation` BEFORE the Solver runs (RED, §10.1(e)); the
+  kernel ALSO re-checks AFTER the Solver and Critic turns, catching an in-place
+  message edit a per-turn role guard misses (H1, §10.1(e)).
 - ``run_pass_hat_k(..., k=3)`` returns a :class:`PuzzleHistory` with 3 attempts.
 - The oracle is NEVER present in ``attempt.messages`` (sealed boundary, §10.4).
 """
@@ -111,6 +116,62 @@ def looping_generate():
     return _gen
 
 
+def tool_budget_overrun_generate(budget: int):
+    """A fake ``generate`` that makes ``budget + 1`` *distinct* tool calls.
+
+    Distinct ``(tool, args)`` avoids the hard-kill loop signal so the kernel halts
+    on the tool-call budget specifically — the call that would push usage past
+    ``tool_call_budget`` raises ``BudgetExceeded(BUDGET)`` inside the governor,
+    which :meth:`Solver.act` catches and stamps onto ``terminated_by`` (§8.4 ANDON).
+    """
+    from crucible.kernel import _SOLVER_HANDLE
+
+    async def _gen(attempt: AttemptState) -> str:
+        solver = attempt.metadata[_SOLVER_HANDLE]
+        for i in range(budget + 1):  # one over budget
+            await solver.record_tool_call("read_file", {"path": f"file_{i}.py"})
+        return "unreachable"  # pragma: no cover - budget fires before this
+
+    return _gen
+
+
+class FakeClock:
+    """A deterministic monotonic clock the kernel can read for time accounting.
+
+    ``run_attempt`` reads wall-clock through an injected ``time_source`` so the
+    live time-budget check (§8.4 / H3) is testable without real sleeps. Each call
+    returns the next queued tick; the last tick repeats once exhausted so a single
+    extra read (the attempt-boundary check) is always defined.
+    """
+
+    def __init__(self, ticks: list[float]) -> None:
+        self._ticks = ticks
+        self._i = 0
+
+    def __call__(self) -> float:
+        tick = self._ticks[min(self._i, len(self._ticks) - 1)]
+        self._i += 1
+        return tick
+
+
+def time_overrun_generate():
+    """A fake ``generate`` that does a single benign tool call then returns.
+
+    Paired with a :class:`FakeClock` whose ticks jump past ``time_budget_seconds``,
+    the kernel's per-turn / attempt-boundary :meth:`BudgetGovernor.check_time`
+    sees the overrun and raises ``BudgetExceeded(TIME)`` live (H3), which the
+    Solver stamps onto ``terminated_by``.
+    """
+    from crucible.kernel import _SOLVER_HANDLE
+
+    async def _gen(attempt: AttemptState) -> str:
+        solver = attempt.metadata[_SOLVER_HANDLE]
+        await solver.record_tool_call("read_file", {"path": "config.py"})
+        return _CORRECT_ANSWER  # pragma: no cover - time check fires at/after this
+
+    return _gen
+
+
 def oracle_runner_for(outcome: OracleOutcome):
     """A fake out-of-band ``oracle_runner`` returning a canned ``outcome``.
 
@@ -145,6 +206,43 @@ def make_judge(verdict: bool | float, *, family: str | None = None):
     if family is not None:
         _judge.family = family  # type: ignore[attr-defined]
     return _judge
+
+
+def make_novelty_judge(
+    novelty_validated: bool, *, verdict: bool = True, family: str | None = None
+):
+    """A fake judge that carries a per-judge ``novelty_validated`` vote (§8.7).
+
+    The panel adjudicates novelty by aggregating each judge's ``novelty_validated``
+    metadata vote (the panel — not the oracle_runner — is the authority). ``verdict``
+    is the judge's primary legitimacy value (the existing panel ``value`` axis)."""
+
+    async def _judge(_attempt: AttemptState) -> Score:
+        return Score(value=verdict, metadata={"novelty_validated": novelty_validated})
+
+    if family is not None:
+        _judge.family = family  # type: ignore[attr-defined]
+    return _judge
+
+
+def novelty_claimed_outcome(meta: PuzzleMeta, *, runner_validated: bool) -> OracleOutcome:
+    """A clean solve that CLAIMS novelty, with the oracle_runner reporting
+    ``novelty_validated=runner_validated``.
+
+    The oracle_runner's novelty_validated must be INERT for the gate (the panel is
+    the authority, §8.7) — these tests set ``runner_validated`` adversarially to
+    prove the kernel does not trust it. Uses ``tool_calls_used == canonical`` so
+    elegance is 0 and the novelty bonus is the only optional component (clean
+    assertion on the score value)."""
+    return OracleOutcome(
+        solved=True,
+        solve_quality=meta.point_threshold + 10.0,
+        no_regression=True,
+        tool_calls_used=meta.rewards.canonical_call_count,  # == canonical → elegance 0
+        time_used=1.0,
+        novelty_claimed=True,
+        novelty_validated=runner_validated,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -253,6 +351,79 @@ def test_hard_kill_attempt_is_not_a_solve(sample_dir: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 2b. Tool-call budget ANDON (M3) + live time-budget ANDON (H3 / M3)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_attempt_tool_budget_overrun_terminates_by_budget(sample_dir: Path) -> None:
+    """A generate that exceeds the TOOL budget (distinct calls, no loop) →
+    terminated_by == BUDGET (M3, mirrors the hard-kill e2e test)."""
+    loaded = load_puzzle(sample_dir)
+    budget = loaded.meta.tool_call_budget
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=tool_budget_overrun_generate(budget),
+            oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+        )
+    )
+
+    assert attempt.terminated_by is TerminatedBy.BUDGET
+    # Halted before producing output; an error event records the budget breach.
+    assert attempt.output is None
+    assert any(e.kind == "error" for e in attempt.events)
+    # The governor admitted exactly the budget, then refused the over-budget call.
+    assert attempt.budget is not None
+    assert attempt.budget.tool_calls_used == budget
+
+
+def test_run_attempt_time_budget_overrun_terminates_by_time(sample_dir: Path) -> None:
+    """LIVE time enforcement (H3 / M3): when the injected clock shows elapsed past
+    time_budget_seconds, the kernel calls governor.check_time and the attempt ends
+    with terminated_by == TIME — not merely flagged post-hoc by the oracle."""
+    loaded = load_puzzle(sample_dir)
+    budget_s = loaded.meta.time_budget_seconds
+    # Clock: start at 0, then jump well past the time budget for the in-turn check.
+    clock = FakeClock([0.0, float(budget_s) + 1.0, float(budget_s) + 2.0])
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=time_overrun_generate(),
+            oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+            time_source=clock,
+        )
+    )
+
+    assert attempt.terminated_by is TerminatedBy.TIME
+    assert any(e.kind == "error" for e in attempt.events)
+    # The live elapsed was recorded on the budget by check_time (kernel-side).
+    assert attempt.budget is not None
+    assert attempt.budget.elapsed_seconds > budget_s
+
+
+def test_run_attempt_within_time_budget_completes(sample_dir: Path) -> None:
+    """A clock that stays under the time budget does not trip the live check —
+    the attempt completes normally (guards against a false-positive TIME halt)."""
+    loaded = load_puzzle(sample_dir)
+    clock = FakeClock([0.0, 1.0, 2.0])  # well under the 600s budget
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=fake_generate(_CORRECT_ANSWER),
+            oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+            time_source=clock,
+        )
+    )
+    assert attempt.terminated_by is TerminatedBy.COMPLETED
+
+
+# --------------------------------------------------------------------------- #
 # 3. Sealed-boundary RED path — chrome leak halts BEFORE the Solver
 # --------------------------------------------------------------------------- #
 
@@ -308,6 +479,101 @@ def test_clean_chrome_does_not_block(sample_dir: Path) -> None:
     # Chrome is held on the attempt but never entered the scored context.
     assert attempt.chrome is chrome
     assert not _chrome_in_messages(attempt)
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Sealed-boundary RED — kernel re-checks AFTER the Solver / Critic turns (H1)
+# --------------------------------------------------------------------------- #
+
+
+def _in_place_leaking_generate(token: str, *, return_text: str = _CORRECT_ANSWER):
+    """A fake ``generate`` that splices ``token`` into an EXISTING scored message.
+
+    In-place mutation is the leak shape a *per-turn* role guard cannot see (the
+    role guard only inspects messages *appended* during its own turn, not edits to
+    messages already present). It is exactly why the kernel must re-run
+    :func:`assert_no_chrome_leak` over the FULL message list after each
+    message-mutating turn (H1, the "family of message-mutating sites"). The kernel
+    re-check raises :class:`SealedBoundaryViolation`, which propagates out.
+    """
+
+    async def _gen(attempt: AttemptState) -> str:
+        # Edit the first scored message in place to inject the chrome token.
+        if attempt.messages:
+            attempt.messages[0] = dict(attempt.messages[0])
+            attempt.messages[0]["content"] = (
+                str(attempt.messages[0].get("content", "")) + f" [leak: {token}]"
+            )
+        return return_text
+
+    return _gen
+
+
+def _critic_leaking_generate(token: str):
+    """A fake ``generate`` shared by Solver+Critic that leaks only on the CRITIC
+    turn: the first call (Solver) returns clean; the second call (Critic) splices
+    ``token`` into an existing message in place. Isolates the post-Critic re-check.
+    """
+    state = {"calls": 0}
+
+    async def _gen(attempt: AttemptState) -> str:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return _CORRECT_ANSWER  # Solver: clean
+        # Critic turn: in-place leak the kernel's post-Critic re-check must catch.
+        if attempt.messages:
+            attempt.messages[0] = dict(attempt.messages[0])
+            attempt.messages[0]["content"] = (
+                str(attempt.messages[0].get("content", "")) + f" [leak: {token}]"
+            )
+        return "a critique"
+
+    return _gen
+
+
+def test_chrome_leak_after_solver_turn_raises(sample_dir: Path) -> None:
+    """A leak introduced by the Solver turn via in-place message edit is caught by
+    the kernel's POST-Solver re-check → SealedBoundaryViolation (H1, §10.1(e)).
+
+    The per-turn role guard misses an in-place edit (it only sees appended
+    messages); the kernel re-check over the full context is what closes the gap."""
+    loaded = load_puzzle(sample_dir)
+    # A string-rendered chrome value (solver-id) the strong guard tokenizes.
+    chrome = build_chrome(
+        rank=11, cohort_size=12, leaderboard=[{"solver": "solver-omega"}]
+    )
+    with pytest.raises(SealedBoundaryViolation):
+        anyio.run(
+            lambda: run_attempt(
+                sample_dir,
+                "m",
+                generate=_in_place_leaking_generate("solver-omega"),
+                oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+                chrome=chrome,
+            )
+        )
+
+
+def test_chrome_leak_after_critic_turn_raises(sample_dir: Path) -> None:
+    """A leak introduced by the CRITIC turn (in-place edit) is caught by the
+    kernel's POST-Critic re-check → SealedBoundaryViolation (H1, §10.1(e)).
+
+    The Solver runs clean; the enabled Critic mutates an existing message in place.
+    Only the kernel's post-Critic re-check covers this message-mutating site."""
+    loaded = load_puzzle(sample_dir)
+    chrome = build_chrome(rank=11, cohort_size=12, leaderboard=[{"solver": "solver-omega"}])
+    with pytest.raises(SealedBoundaryViolation):
+        anyio.run(
+            lambda: run_attempt(
+                sample_dir,
+                "m",
+                # Solver returns clean; the Critic generate does the in-place leak.
+                generate=_critic_leaking_generate("solver-omega"),
+                oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+                chrome=chrome,
+                enable_critic=True,
+            )
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -427,6 +693,102 @@ def test_no_judges_means_no_panel_score(sample_dir: Path) -> None:
     )
     assert "oracle" in attempt.scores
     assert "panel" not in attempt.scores
+
+
+# --------------------------------------------------------------------------- #
+# Novelty is PANEL-adjudicated, not oracle_runner-trusted (H2, §8.3/§8.7)
+# --------------------------------------------------------------------------- #
+
+
+def test_panel_validated_novelty_reaches_the_gate_value(sample_dir: Path) -> None:
+    """When the PANEL validates novelty, the bonus reaches the oracle score value —
+    even though the oracle_runner reported novelty_validated=False (H2, §8.7).
+
+    The panel — a cross-family verifier — is the novelty authority; its verdict, not
+    the oracle_runner's self-report, drives the gate + bonus."""
+    loaded = load_puzzle(sample_dir)
+    judges = [
+        make_novelty_judge(True, family="qwen"),
+        make_novelty_judge(True, family="mistral"),
+    ]
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "claude-opus-4-8",
+            generate=fake_generate(_CORRECT_ANSWER),
+            # oracle_runner says NOT validated — must be ignored for novelty.
+            oracle_runner=oracle_runner_for(
+                novelty_claimed_outcome(loaded.meta, runner_validated=False)
+            ),
+            judges=judges,
+            generator_family="claude",
+        )
+    )
+    oracle = attempt.scores["oracle"]
+    assert oracle.metadata["gate_passed"] is True
+    # grade() uses outcome.solve_quality as the solve component (not rewards.solve);
+    # tool_calls == canonical → elegance 0; so value = solve_quality + novelty bonus.
+    solve_quality = loaded.meta.point_threshold + 10.0  # per novelty_claimed_outcome
+    expected = solve_quality + loaded.meta.rewards.novelty_bonus_max
+    assert oracle.value == pytest.approx(expected)
+    assert oracle.metadata["components"]["novelty"] == pytest.approx(
+        loaded.meta.rewards.novelty_bonus_max
+    )
+    # The panel surfaced the novelty verdict it adjudicated.
+    assert attempt.scores["panel"].metadata["novelty_validated"] is True
+
+
+def test_panel_rejected_novelty_blocks_bonus_even_if_runner_said_true(
+    sample_dir: Path,
+) -> None:
+    """LOAD-BEARING (H2, §8.7): the panel REJECTS novelty → no bonus AND the gate
+    closes (novelty_unvalidated), EVEN THOUGH the oracle_runner reported
+    novelty_validated=True. Proves the panel overrides the oracle_runner."""
+    loaded = load_puzzle(sample_dir)
+    judges = [
+        make_novelty_judge(False, family="qwen"),
+        make_novelty_judge(False, family="mistral"),
+    ]
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "claude-opus-4-8",
+            generate=fake_generate(_CORRECT_ANSWER),
+            # The trap: oracle_runner CLAIMS the novelty is validated.
+            oracle_runner=oracle_runner_for(
+                novelty_claimed_outcome(loaded.meta, runner_validated=True)
+            ),
+            judges=judges,
+            generator_family="claude",
+        )
+    )
+    oracle = attempt.scores["oracle"]
+    # Panel said no → an unvalidated novelty claim closes the gate (§8.3).
+    assert oracle.metadata["gate_passed"] is False
+    assert "novelty_unvalidated" in oracle.metadata["failed_conditions"]
+    assert oracle.value == 0.0
+    assert attempt.scores["panel"].metadata["novelty_validated"] is False
+
+
+def test_novelty_claim_without_judges_is_not_validated(sample_dir: Path) -> None:
+    """A novelty claim with NO panel cannot be validated — the oracle_runner is not
+    the authority, so the gate closes even if the runner self-reports validated
+    (H2, §8.7). Absent a panel, novelty is never auto-granted."""
+    loaded = load_puzzle(sample_dir)
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "claude-opus-4-8",
+            generate=fake_generate(_CORRECT_ANSWER),
+            oracle_runner=oracle_runner_for(
+                novelty_claimed_outcome(loaded.meta, runner_validated=True)
+            ),
+            # no judges supplied
+        )
+    )
+    oracle = attempt.scores["oracle"]
+    assert oracle.metadata["gate_passed"] is False
+    assert "novelty_unvalidated" in oracle.metadata["failed_conditions"]
 
 
 # --------------------------------------------------------------------------- #
