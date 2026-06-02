@@ -305,8 +305,18 @@ def _measure(
     *,
     human_human_kappa: float,
     records_per_annotator: dict[str, list[JudgmentRecord]] | None,
+    human_grounded: bool = False,
+    alt_test_epsilon: float | None = None,
+    alt_test_exclude: set[str] | None = None,
 ) -> _Metrics:
-    """Run the §11.1 metrics over ``records`` → the pure :class:`_Metrics` scalars (§12)."""
+    """Run the §11.1 metrics over ``records`` → the pure :class:`_Metrics` scalars (§12).
+
+    When ``human_grounded`` is True the alt-test ω is the AUDIT-READY procedure
+    (:func:`metrics.alt_test` — per-tier ε + paired t-test + BY-FDR against HUMAN
+    annotators, Fork C §12.1); otherwise it is the circular model-jury PROXY
+    (:func:`metrics.alt_test_omega`). The seat threshold (ω ≥ 0.5) is unchanged — only
+    the estimator differs.
+    """
     n_items = len({r.item_id for r in records})
 
     accuracy = M.difficulty_weighted_accuracy(records)
@@ -319,7 +329,14 @@ def _measure(
 
     omega: float | None = None
     if records_per_annotator is not None:
-        omega = M.alt_test_omega(records_per_annotator)
+        if human_grounded:
+            omega = M.alt_test(
+                records_per_annotator,
+                epsilon=alt_test_epsilon if alt_test_epsilon is not None else 0.1,
+                exclude_items=alt_test_exclude,
+            )
+        else:
+            omega = M.alt_test_omega(records_per_annotator)
 
     cons = M.consistency(records)
     item_counts: dict[str, int] = {}
@@ -356,6 +373,9 @@ def build_profile(
     *,
     human_human_kappa: float = 0.80,
     records_per_annotator: dict[str, list[JudgmentRecord]] | None = None,
+    human_grounded: bool = False,
+    alt_test_epsilon: float | None = None,
+    alt_test_exclude: set[str] | None = None,
     quant: str | None = None,
     gates: SeatGates | None = None,
 ) -> JudgeProfile:
@@ -403,6 +423,9 @@ def build_profile(
         records,
         human_human_kappa=human_human_kappa,
         records_per_annotator=records_per_annotator,
+        human_grounded=human_grounded,
+        alt_test_epsilon=alt_test_epsilon,
+        alt_test_exclude=alt_test_exclude,
     )
     notes: list[str] = []
 
@@ -451,8 +474,13 @@ def build_profile(
     # --- §11.1 #3 alt-test substitution ω (optional data) ---
     if m.omega is not None:
         omega_ok = m.omega >= g.alt_test_omega
+        if human_grounded:
+            eps = alt_test_epsilon if alt_test_epsilon is not None else 0.1
+            src = f"HUMAN-grounded (ε={eps:.2f}, paired-t + BY-FDR; Calderon 2025)"
+        else:
+            src = "model-jury PROXY (CIRCULAR; not a substitution guarantee)"
         notes.append(
-            f"alt-test ω={m.omega:.3f} ({'≥' if omega_ok else '<'} "
+            f"alt-test ω={m.omega:.3f} [{src}] ({'≥' if omega_ok else '<'} "
             f"{g.alt_test_omega:.2f} → {'seat-eligible' if omega_ok else 'SCREEN-only'})"
         )
     else:

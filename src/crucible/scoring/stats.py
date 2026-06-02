@@ -16,6 +16,8 @@ All functions are pure and deterministic: same inputs grade identically tomorrow
 
 from __future__ import annotations
 
+import math
+
 from scipy.stats import beta, binomtest, norm
 
 __all__ = [
@@ -24,6 +26,7 @@ __all__ = [
     "clopper_pearson",
     "mcnemar_exact",
     "graduates",
+    "conformal_coverage_interval",
 ]
 
 
@@ -179,6 +182,66 @@ def mcnemar_exact(b: int, c: int) -> float:
     if n_discordant == 0:
         return 1.0
     return float(binomtest(b, n_discordant, 0.5, alternative="two-sided").pvalue)
+
+
+def conformal_coverage_interval(
+    n: int, alpha: float, conf: float = 0.95
+) -> tuple[float, float, float]:
+    """Realized-coverage interval for split conformal from ONE calibration set of size n.
+
+    The coverage actually realized from a single small calibration set is a RANDOM
+    variable, not the nominal ``1 − alpha``: it is Beta(n+1−l, l)-distributed with
+    ``l = floor((n+1)·alpha)`` (Vovk 2012, arXiv:1209.2673; Angelopoulos & Bates 2021
+    §3.2, arXiv:2107.07511), and that distribution is UNIVERSAL — determined solely by
+    ``(alpha, n)``, independent of the data (Marques F. 2023, arXiv:2303.02770). At
+    N≈30–50 it is wide: a nominal 90% can realize ~80–97%. This is the honest small-N
+    coverage statement crucible attaches to a SEAT DECISION's false-seat rate (never to ω
+    itself, which is already an aggregate) — a single-set point "90% coverage" claim at
+    N<50 is statistically indefensible, so we report the interval the chosen N actually
+    buys. The mean lies in ``[1−alpha, 1−alpha + 1/(n+1)]``.
+
+    Pure + deterministic (PIN_PER_STEP), reusing the already-imported ``scipy.stats.beta``
+    (no new dependency) — the same admissible-at-small-N discipline as Wilson/Clopper-
+    Pearson above. The risk-controlled DERIVATION of the seat cut itself (conformal risk
+    control + Learn-Then-Test; Angelopoulos 2022 arXiv:2208.02814 / 2021 arXiv:2110.01052)
+    and the SSBC level inflation (Zwart 2025, arXiv:2509.15349) are a documented deferred
+    slice (§12.1); this primitive supplies the coverage spread that statement quotes.
+
+    Args:
+        n: calibration-set size (number of human-labeled items; n > 0).
+        alpha: target miscoverage (e.g. 0.10 for a 90% target); in ``(0, 1)``.
+        conf: central probability mass of the reported interval over calibration draws
+            (default 0.95).
+
+    Returns:
+        ``(lower, upper, mean)`` realized coverage — the central ``conf`` interval of the
+        Beta(n+1−l, l) coverage distribution plus its mean. When ``alpha`` is too small
+        for ``n`` to admit a finite-sample guarantee (``l < 1``), returns
+        ``(1.0, 1.0, 1.0)`` (the degenerate full-coverage regime).
+
+    Raises:
+        ValueError: ``n <= 0``, ``alpha`` not in ``(0, 1)``, or ``conf`` not in ``(0, 1)``.
+    """
+    if n <= 0:
+        raise ValueError(f"n must be a positive integer, got {n}")
+    if not 0.0 < alpha < 1.0:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha}")
+    if not 0.0 < conf < 1.0:
+        raise ValueError(f"conf must be in (0, 1), got {conf}")
+    # floor((n+1)·alpha), nudged so a product that is mathematically an integer but
+    # represented just below it in float64 (e.g. 63.0 → 62.999…) floors correctly — an
+    # off-by-one in the l-th order statistic otherwise (re-audit fork-c-stats LOW).
+    ell = math.floor((n + 1) * alpha + 1e-9)
+    if ell < 1:
+        # alpha too small for this n: no l-th order statistic exists; coverage → 1.
+        return (1.0, 1.0, 1.0)
+    a = n + 1 - ell
+    b = ell
+    tail = (1.0 - conf) / 2.0
+    lower = float(beta.ppf(tail, a, b))
+    upper = float(beta.ppf(1.0 - tail, a, b))
+    mean = float(a / (a + b))
+    return (lower, upper, mean)
 
 
 def graduates(successes: int, n: int) -> bool:

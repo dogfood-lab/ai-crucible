@@ -45,6 +45,11 @@ from crucible.calibration import irt
 from crucible.calibration.loader import load_items
 from crucible.calibration.types import CalibrationCategory, CalibrationItem
 from crucible.characterize import aggregate
+from crucible.characterize.human_labels import (
+    HumanLabels,
+    build_records_per_annotator,
+    load_human_labels,
+)
 from crucible.characterize.metrics import temperature_scaled_ece_cv
 from crucible.characterize.panel_store import save_panel
 from crucible.characterize.profile import build_profile, perturbation_audit
@@ -65,6 +70,19 @@ _ALT_TEST_CAVEAT = (
     "agree with each other), NOT a substitution guarantee. Seat decisions are "
     "PROVISIONAL until human labels exist (§12 Q3)."
 )
+
+#: The Fork-C note stamped when REAL human labels are supplied (``--human-labels``): ω is
+#: the non-circular, audit-ready substitution test, so the circular caveat is retired.
+def _alt_test_human_note(hl: HumanLabels) -> str:
+    return (
+        f"alt-test ω is HUMAN-GROUNDED (Fork C, §12.1): {hl.n_annotators} independent human "
+        f"annotators over {hl.n_items} items, ε={hl.epsilon:.2f}, computed by the audit-ready "
+        "procedure (per-annotator one-sided paired t-test of H0: ρ_judge ≤ ρ_human − ε, "
+        "Benjamini-Yekutieli FDR q=0.05, ω = fraction of rejected nulls; Calderon, Reichart "
+        f"& Dror 2025, arXiv:2501.10970 §3). Human–human Krippendorff α={hl.iaa_alpha:.3f}. "
+        "The reference is NO LONGER the seated model population, so ω is NOT circular — the "
+        "model-jury caveat is retired for this run."
+    )
 
 # Default local panel (cross-family) — already pulled on the Omen. (model_id, family, quant)
 DEFAULT_PANEL: list[tuple[str, str, str | None]] = [
@@ -173,13 +191,22 @@ async def run_panel(
     items: list[CalibrationItem],
     *,
     k: int = 3,
+    human_labels: HumanLabels | None = None,
 ) -> tuple[dict[str, JudgeProfile], dict[str, list[JudgmentRecord]]]:
-    """Sequential load → judge → evict, then profile with the model-jury alt-test (§11.2/§12).
+    """Sequential load → judge → evict, then profile with the alt-test (§11.2/§12).
 
     Two passes: (1) judge the whole panel one model at a time (VRAM-respecting —
-    ``OLLAMA_NUM_PARALLEL=1``, evict between models); (2) build each model's profile
-    with the *other* models supplied as its alt-test jury (the documented bootstrap).
+    ``OLLAMA_NUM_PARALLEL=1``, evict between models); (2) build each model's profile.
     Pass 2 needs the full record set first, which is why profiling is deferred.
+
+    The alt-test reference (pass 2) is chosen by ``human_labels``:
+
+    * **``None``** — the circular model-jury bootstrap (the *other* panel models stand in
+      as annotators; ω is the PROXY :func:`metrics.alt_test_omega`; the loud caveat holds).
+    * **supplied** — the NON-circular, audit-ready human alt-test (Fork C §12.1): each
+      judge is profiled against the REAL human annotators via :func:`metrics.alt_test`
+      (per-tier ε + paired t-test + BY-FDR), DISPUTED items excluded, and the κ-z baseline
+      is the measured human–human Krippendorff α.
     """
     os.environ.setdefault("OLLAMA_NUM_PARALLEL", "1")
     os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
@@ -202,16 +229,33 @@ async def run_panel(
         print(f"[{model_id}] judged {len(recs)} records  acc={acc:.3f}  ({elapsed:.0f}s)")
         _evict(model_id)
 
+    disputed = set(human_labels.disputed) if human_labels else None
     profiles: dict[str, JudgeProfile] = {}
     for model_id, recs in all_records.items():
-        rpa = _jury(all_records, model_id, recs)
-        profile = build_profile(
-            model_id,
-            RoleSlot.JUDGE,
-            recs,
-            records_per_annotator=rpa,
-            quant=quant_by_id.get(model_id),
-        )
+        if human_labels is not None:
+            profile = build_profile(
+                model_id,
+                RoleSlot.JUDGE,
+                recs,
+                records_per_annotator=build_records_per_annotator(human_labels, recs),
+                human_grounded=True,
+                alt_test_epsilon=human_labels.epsilon,
+                alt_test_exclude=disputed,
+                human_human_kappa=human_labels.iaa_alpha,
+                quant=quant_by_id.get(model_id),
+            )
+            # Surface the human-set caveats (n<30 under-power, low-IAA ε clamp, DISPUTED
+            # drops) in the profile itself, where the seat is justified — not only in the
+            # run report (re-audit fork-c-integration LOW).
+            profile.notes.extend(f"[human-set] {note}" for note in human_labels.notes)
+        else:
+            profile = build_profile(
+                model_id,
+                RoleSlot.JUDGE,
+                recs,
+                records_per_annotator=_jury(all_records, model_id, recs),
+                quant=quant_by_id.get(model_id),
+            )
         profiles[model_id] = profile
         flag = " [review]" if profile.metadata.get("review_flag") else ""
         q = profile.metadata.get("quality_score")
@@ -380,19 +424,38 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="also write the composed seated panel to this path (the committed artifact)",
     )
+    ap.add_argument(
+        "--human-labels",
+        type=Path,
+        default=None,
+        help="human_labels.json — REAL annotators for a non-circular alt-test ω (Fork C, §12.1)",
+    )
     args = ap.parse_args(argv)
 
     items = load_items(args.items) if args.items else _load_admission_items()
     panel = _parse_models(args.models) if args.models else DEFAULT_PANEL
+    human_labels = load_human_labels(args.human_labels, items) if args.human_labels else None
 
-    profiles, records = asyncio.run(run_panel(panel, items, k=args.k))
+    profiles, records = asyncio.run(run_panel(panel, items, k=args.k, human_labels=human_labels))
 
     report = {
         "n_items": len(items),
         "k": args.k,
         "item_set": args.items.name if args.items else "admission_pairs.json",
-        "alt_test_reference": "model-jury-bootstrap",
-        "alt_test_caveat": _ALT_TEST_CAVEAT,
+        "alt_test_reference": "human" if human_labels else "model-jury-bootstrap",
+        "alt_test_caveat": _alt_test_human_note(human_labels) if human_labels else _ALT_TEST_CAVEAT,
+        "human_alt_test": (
+            {
+                "n_annotators": human_labels.n_annotators,
+                "n_items_labeled": human_labels.n_items,
+                "epsilon": human_labels.epsilon,
+                "iaa_krippendorff_alpha": round(human_labels.iaa_alpha, 4),
+                "disputed_items": human_labels.disputed,
+                "notes": human_labels.notes,
+            }
+            if human_labels
+            else None
+        ),
         "profiles": {m: asdict(p) for m, p in profiles.items()},
         "known_groups": known_groups_report(items, records),
         "panel_correlation": panel_correlation_report(records),

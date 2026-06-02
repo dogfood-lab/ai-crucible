@@ -83,7 +83,7 @@ from dataclasses import replace
 
 import numpy as np
 from scipy.optimize import minimize_scalar
-from scipy.stats import norm, pearsonr
+from scipy.stats import norm, pearsonr, ttest_1samp
 from statsmodels.stats.inter_rater import cohens_kappa
 
 from crucible.characterize.types import JudgmentRecord
@@ -97,6 +97,8 @@ __all__ = [
     "kappa_zscore",
     "human_like_kappa",
     "alt_test_omega",
+    "alt_test",
+    "krippendorff_alpha",
     "consistency",
     "expected_calibration_error",
     "position_bias",
@@ -369,7 +371,14 @@ def human_like_kappa(kappa: float, human_human_kappa: float, n: int) -> bool:
 
 
 def alt_test_omega(records_per_annotator: dict[str, list[JudgmentRecord]]) -> float:
-    """Leave-one-annotator-out winning rate ω — §11.1 #3 (the alt-test).
+    """Leave-one-annotator-out winning rate ω — §11.1 #3 — the SIMPLIFIED PROXY.
+
+    This is a mean-margin winning rate with NO significance test, ε tolerance, or
+    multiple-comparison control — a deliberately simple proxy that would NOT survive a
+    third-party audit (the study-swarm finding behind Fork C). It is kept ONLY for the
+    circular model-jury bootstrap (which is itself a documented non-reference). The
+    HUMAN-grounded, audit-ready ω is :func:`alt_test` (per-tier ε + paired t-test +
+    Benjamini-Yekutieli FDR, Calderon 2025 §3 Algorithm 1).
 
     The alt-test (Calderon, Reichart & Dror 2025, arXiv:2501.10970) asks the
     *substitution* question directly: if we swapped a human annotator for the
@@ -449,6 +458,187 @@ def alt_test_omega(records_per_annotator: dict[str, list[JudgmentRecord]]) -> fl
             "(the judge shares no items with the human annotators)"
         )
     return wins / folds
+
+
+def _one_sided_t_pvalue(diffs: list[float], popmean: float) -> float:
+    """Upper-tailed one-sample t-test p-value for H0: mean(diffs) ≤ popmean.
+
+    Degenerate guards so a fold never crashes the test: <2 points → 1.0 (no significance
+    establishable); zero sample variance → 0.0 if the constant mean clears popmean else
+    1.0 (a t-test would divide by zero); a NaN from scipy → 1.0 (fail to reject).
+    """
+    if len(diffs) < 2:
+        return 1.0
+    arr = np.asarray(diffs, dtype=float)
+    if float(arr.std(ddof=1)) == 0.0:
+        return 0.0 if float(arr.mean()) > popmean else 1.0
+    p = float(ttest_1samp(arr, popmean, alternative="greater").pvalue)
+    return p if not math.isnan(p) else 1.0
+
+
+def _benjamini_yekutieli(pvalues: list[float], q: float) -> list[bool]:
+    """Benjamini-Yekutieli FDR at level ``q`` → a per-hypothesis reject mask.
+
+    BY (Benjamini & Yekutieli, Annals of Statistics 2001) controls the FDR under
+    ARBITRARY dependence — the leave-one-out folds share annotators, so they are
+    dependent and BH would be anti-conservative. The BH threshold is divided by the
+    harmonic number c(m)=Σ_{i=1}^m 1/i. Reject the k smallest p-values where k is the
+    largest rank with ``p_(k) ≤ (k/m)·(q/c(m))``.
+    """
+    m = len(pvalues)
+    if m == 0:
+        return []
+    c_m = sum(1.0 / i for i in range(1, m + 1))
+    order = sorted(range(m), key=lambda i: pvalues[i])
+    k_max = 0
+    for rank, idx in enumerate(order, start=1):
+        if pvalues[idx] <= (rank / m) * (q / c_m):
+            k_max = rank
+    reject = [False] * m
+    for rank, idx in enumerate(order, start=1):
+        if rank <= k_max:
+            reject[idx] = True
+    return reject
+
+
+def alt_test(
+    records_per_annotator: dict[str, list[JudgmentRecord]],
+    *,
+    epsilon: float = 0.1,
+    q: float = 0.05,
+    exclude_items: set[str] | None = None,
+) -> float:
+    """The alt-test winning rate ω — the AUDIT-READY procedure (Calderon 2025, §3 Alg. 1).
+
+    Unlike :func:`alt_test_omega` (a winning-rate PROXY that counts mean-margin folds with
+    no significance test — kept only for the circular model-jury bootstrap), this is the
+    real substitution test against HUMAN annotators (Fork C, §12.1). Per held-out human
+    annotator ``h`` (a leave-one-out fold), it runs a one-sided paired t-test over the
+    shared items of H0: ρ_judge ≤ ρ_human − ε, where per item ρ_judge = 1[judge==h] and
+    ρ_human = mean over the OTHER humans of 1[other==h]. ``ε`` is the cost-of-human
+    tolerance (Calderon §B.1: 0.2 expert / 0.15 skilled / 0.1 crowd) — it LOWERS the bar
+    the judge must clear, giving benefit of the doubt when humans are costly. The m fold
+    p-values get a Benjamini-Yekutieli FDR correction (``q``, default 0.05; handles the
+    folds' shared-annotator dependence), and ω is the fraction of REJECTED nulls. Seat iff
+    ω ≥ 0.5.
+
+    Args:
+        records_per_annotator: ``{annotator_id: [...]}`` with a reserved ``"judge"`` entry
+            and **≥3 human** annotators (Calderon FAQ: two degenerates the leave-one-out).
+        epsilon: per-tier substitution tolerance in ``[0, 1]``. Default 0.1 (the most
+            conservative crowd tier); the human-label loader threads the real tier ε.
+        q: BY-FDR level (default 0.05).
+        exclude_items: item ids dropped from every fold (e.g. DISPUTED items where humans
+            cannot agree — Plank 2022: never force a judge on items humans split on).
+
+    Returns:
+        ω in ``[0, 1]`` — the fraction of leave-one-human-out folds the judge wins under
+        the FDR-corrected significance test.
+
+    Raises:
+        ValueError: missing ``"judge"`` entry, fewer than 3 human annotators, ε out of
+            range, or no comparable folds.
+    """
+    if "judge" not in records_per_annotator:
+        raise ValueError("alt_test requires a 'judge' entry (the candidate)")
+    if not 0.0 <= epsilon <= 1.0:
+        raise ValueError(f"epsilon must be in [0, 1], got {epsilon}")
+    humans = {k: v for k, v in records_per_annotator.items() if k != "judge"}
+    if len(humans) < 3:
+        raise ValueError(
+            f"alt_test requires >= 3 human annotators (Calderon 2025 FAQ); got {len(humans)}"
+        )
+    exclude = set(exclude_items or ())
+    judge = {
+        r.item_id: r.predicted
+        for r in records_per_annotator["judge"]
+        if r.item_id not in exclude
+    }
+    human_by = {
+        h: {r.item_id: r.predicted for r in recs if r.item_id not in exclude}
+        for h, recs in humans.items()
+    }
+
+    pvalues: list[float] = []
+    for held in humans:
+        held_labels = human_by[held]
+        others = [h for h in humans if h != held]
+        diffs: list[float] = []
+        for item_id, hv in held_labels.items():
+            if item_id not in judge:
+                continue
+            other_vals = [human_by[o][item_id] for o in others if item_id in human_by[o]]
+            if not other_vals:
+                continue
+            ja = 1.0 if judge[item_id] == hv else 0.0
+            ha = sum(1.0 if ov == hv else 0.0 for ov in other_vals) / len(other_vals)
+            diffs.append(ja - ha)
+        # Skip a degenerate fold (judge shares <2 items with this annotator): a paired
+        # t-test needs ≥2 points. Appending a phantom p=1.0 here would (a) make the "no
+        # comparable folds" guard below dead code — a fully-disjoint judge would silently
+        # score ω=0.0 instead of raising — and (b) inflate the BY denominator m and c(m),
+        # depressing ω for the genuinely-comparable folds (re-audit fork-c-stats MEDIUM).
+        if len(diffs) >= 2:
+            pvalues.append(_one_sided_t_pvalue(diffs, -epsilon))
+
+    if not pvalues:
+        raise ValueError(
+            "alt_test found no comparable leave-one-out folds (every fold shares < 2 items "
+            "between the judge and the human annotators)"
+        )
+    reject = _benjamini_yekutieli(pvalues, q)
+    return sum(reject) / len(reject)
+
+
+def krippendorff_alpha(records_per_annotator: dict[str, list[JudgmentRecord]]) -> float:
+    """Nominal Krippendorff's α inter-annotator agreement over the HUMAN annotators.
+
+    α (Krippendorff 2011) is the chance-corrected agreement coefficient that — unlike
+    Cohen's/Fleiss' κ — handles a SPARSE matrix (not every annotator labels every item)
+    and any number of coders, exactly the human-label shape the alt-test allows (≥3
+    annotators over ≥30 items, not a full grid). The reserved ``"judge"`` key, if present,
+    is excluded — this measures HUMAN–HUMAN reliability (the κ-z baseline and the
+    honest-surface IAA the seating report carries). Bands (Krippendorff): α≥0.80 reliable,
+    0.667–0.80 tentative, <0.667 insufficient.
+
+    Uses the coincidence-matrix form: α = 1 − (n−1)·Σ_{c≠k} o_ck / Σ_{c≠k} n_c·n_k, where
+    o_ck are within-item value-pair coincidences (each item with m ratings contributes
+    1/(m−1) per ordered pair) and n_c are the coincidence marginals.
+
+    Returns:
+        α in ``(−∞, 1]``. 1.0 = perfect agreement; ~0 = chance; <0 = systematic
+        disagreement. Returns 1.0 for the degenerate no-disagreement-possible case (a
+        single value overall, or no item rated by ≥2 annotators).
+    """
+    humans = {k: v for k, v in records_per_annotator.items() if k != "judge"}
+    by_item: dict[str, list[object]] = defaultdict(list)
+    for recs in humans.values():
+        for r in recs:
+            by_item[r.item_id].append(r.predicted)
+
+    coincidence: dict[tuple, float] = defaultdict(float)
+    values: set = set()
+    for vals in by_item.values():
+        m_u = len(vals)
+        if m_u < 2:
+            continue
+        values.update(vals)
+        for i in range(m_u):
+            for j in range(m_u):
+                if i != j:
+                    coincidence[(vals[i], vals[j])] += 1.0 / (m_u - 1)
+    if len(values) < 2:
+        return 1.0
+    cats = sorted(values, key=repr)
+    n_c = {c: sum(coincidence[(c, k)] for k in cats) for c in cats}
+    n = sum(n_c.values())
+    if n < 2:
+        return 1.0
+    sum_o = sum(coincidence[(c, k)] for c in cats for k in cats if c != k)
+    sum_e = sum(n_c[c] * n_c[k] for c in cats for k in cats if c != k)
+    if sum_e == 0:
+        return 1.0
+    return 1.0 - (n - 1) * sum_o / sum_e
 
 
 def consistency(records: list[JudgmentRecord]) -> float:

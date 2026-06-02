@@ -745,3 +745,100 @@ The redesign is built and run. Panel: 6 cross-family local models × the 51-item
 - **Three integration bugs were caught by the real run**, not the unit suite: (1) the panel-ρ glue passed the wrong shape (`'str' has no attribute 'predicted'`); (2) `judge_item` stamped a *prompt-hash* `item_id`, making the first run's known-groups "pass" vacuous; (3) logprobs sent under `options` are silently ignored by Ollama 0.24.0 — they must be **top-level**, so ECE was dead despite the wiring. All three fixed + regression-tested. EXTERNAL_VERIFIER and the live run earned their keep.
 
 **Calibration — temperature scaling (added, §12 Q3).** The Q3 post-hoc step is implemented: `metrics.fit_temperature` / `apply_temperature` (Guo et al. 2017, arXiv:1706.04599) fit a single scalar `T` minimizing correctness-NLL and rescale the verdict-token-logprob confidence — lowering ECE without touching accuracy/agreement (it is monotonic in the confidence). The run report's `calibration` section reports per-judge **held-out** ECE: `metrics.temperature_scaled_ece_cv` does k-fold cross-validation **grouped by `item_id`** (every test-retest rerun of an item lands in the same fold, so no temperature is fit on one rerun and tested on another — no leakage), fits `T` on the train folds and measures ECE on the pooled held-out folds. So `ece_cv` is the out-of-sample number temperature scaling actually buys, not the optimistic in-sample one. (The in-sample `temperature_scaled_ece` remains as a primitive; a train-fold with one correctness class yields `T=1.0` — "no calibration learned" — rather than an overfit temperature.) The next characterization run populates the section; this improves qwen's 0.121 ECE with no extra GPU.
+
+### 12.2 Fork C — the human alt-test harness (retiring the circular ω)
+
+Fork C (Phase-2 swarm, 2026-06-02) replaces the **circular model-jury ω** — flagged as
+provisional in §12.1 — with a **non-circular, audit-ready** substitution test against REAL
+human annotators. A study-swarm (research-grounded-advisor protocol; the four questions
+below) grounded the design, and the new citations were retrieval-oracle existence-checked
+before this lock (EXTERNAL_VERIFIER Step 4: 0 fabrications, 0 misattributions). Code:
+`characterize/human_labels.py`, `metrics.alt_test`/`krippendorff_alpha`,
+`scoring.stats.conformal_coverage_interval`, the `run.py --human-labels` flag; tests in
+`tests/test_human_labels.py`.
+
+**The proxy was not audit-ready — that is the finding that set Fork C's true scope.** The
+shipped `alt_test_omega` is a *mean-margin winning rate* with no significance test, no ε
+tolerance, and no multiple-comparison control. The real alt-test (Calderon, Reichart & Dror
+2025, arXiv:2501.10970 §3, Algorithm 1) is: per held-out human annotator, a one-sided paired
+t-test of H0: ρ_judge ≤ ρ_human − ε; the *m* fold p-values get a **Benjamini-Yekutieli** FDR
+correction (q=0.05; BY because the leave-one-out folds share annotators and are dependent —
+Benjamini & Yekutieli, Annals of Statistics 2001); ω is the fraction of rejected nulls; seat
+iff ω ≥ 0.5. Shipping the proxy *as the human reference* would bury a known defect, so
+`metrics.alt_test` implements the real procedure for the human path; `alt_test_omega` is kept
+**only** for the (already-circular) model-jury bootstrap, re-documented as a proxy.
+
+**The four design questions → the implemented design:**
+
+1. **Schema is the un-aggregated per-annotator matrix.** The alt-test is aggregation-free by
+   construction — it compares the judge against held-out *individuals*, never a forged gold
+   (Calderon 2025). Davani et al. 2022 (arXiv:2110.05719) show per-annotator labels lose no
+   accuracy vs an aggregated gold. → `human_labels.json` is `item_id → {annotator_id: verdict}`;
+   the loader builds `{annotator_id: [JudgmentRecord]}` keyed exactly like the model-jury dict,
+   verdicts mapped to 0/1 by the *same* `_to_num` as the judge's records so every existing
+   metric runs unchanged.
+2. **Population & ε.** ≥3 annotators (Calderon FAQ: two degenerates the leave-one-out), ≥30
+   items (t-test normality floor; below it under-powered → loud note, Wilcoxon variant
+   deferred), per-tier ε = 0.2 expert / 0.15 skilled / 0.1 crowd (Calderon §B.1). → the loader
+   enforces the ≥3 floor (hard error), takes the most conservative ε across declared tiers,
+   and **clamps ε ≤ 0.1 with an "add items" flag when IAA is insufficient** (Calderon §B.2).
+3. **IAA & adjudication.** Krippendorff's α — not Cohen/Fleiss κ — is the right coefficient
+   because the human matrix is sparse and multi-coder (Krippendorff 2011). → `krippendorff_alpha`
+   reports human–human reliability AND feeds the κ-z baseline (the finding: the baseline must come
+   from real humans, not a hardcoded 0.80). High-disagreement items are **DISPUTED and dropped
+   from the ω denominator, never force-resolved** (Plank 2022, arXiv:2211.02570; Aroyo & Welty
+   2015 — disagreement marks ambiguous items, not annotator error); MACE/Dawid-Skene
+   competence-weighted pool QC (Hovy et al. 2013; Dawid & Skene 1979) and escalation to a
+   **human** tie-breaker — never a model, or the reference re-absorbs the circularity (cf. Yuan
+   et al. 2025, arXiv:2503.17620, multi-LLM + targeted human review) — are documented lazy-optional hooks (parallel to
+   `calibration/irt.py`'s Bayesian path).
+4. **Honest small-N coverage.** A coverage guarantee attaches to the **seat decision's
+   false-seat rate**, never to ω (which is already an aggregate). Realized split-conformal
+   coverage from one small set is Beta(n+1−l, l)-distributed and wide at N<50 — a nominal 90%
+   realizes ~80–97% (Vovk 2012, arXiv:1209.2673; Angelopoulos & Bates 2021 §3.2,
+   arXiv:2107.07511), a *universal* spread depending only on (α, N) (Marques F. 2023,
+   arXiv:2303.02770). → `conformal_coverage_interval` ships that exact interval (verified:
+   N=40,α=0.1 → realized 0.796–0.972). Selective SEAT/SCREEN/REJECT is already a reject-option
+   classifier (Geifman & El-Yaniv 2017). **Deferred** (documented): the SSBC level inflation
+   (Zwart 2025, arXiv:2509.15349) and the risk-controlled cut-derivation via conformal risk
+   control + Learn-Then-Test (Angelopoulos 2022 arXiv:2208.02814 / 2021 arXiv:2110.01052) that
+   would replace the ω ≥ 0.5 fiat — the coverage primitive lands now; the cut-derivation is the
+   next slice.
+
+**Annotation-UI contract (for when humans are recruited).** The loader is UI-agnostic but the
+study fixes the required collection format, recorded here so the eventual human-facing tool is
+built right: a **comparative A/B verdict with a real "unsure"/tie option** (Kiritchenko &
+Mohammad 2017, arXiv:1712.01765 — Best-Worst Scaling, the comparative primitive of which A/B is
+the 2-item case, is far more intra-annotator-consistent than Likert; Krosnick & Presser 2010 —
+forced binary injects ~14% acquiescence; the loader treats `unsure`/`tie` as *no label*, never
+coerced to a side); **randomized candidate order** with the shown position persisted so
+`position_bias` runs on humans (Shi et al. 2024, arXiv:2406.07791 — order-swapping moves
+outcomes, scaling with the quality gap); a **per-side
+correctness micro-judgment before the comparative pick** (Jeong et al. 2024, arXiv:2406.12319,
+"The Comparative Trap"/PRePair — pairwise amplifies superficial-attribute bias vs pointwise);
+**blinding** to gold, to which side any model picked, and to candidate provenance (van der Lee
+et al. 2019, W19-8643); embedded **gold/known-answer attention checks** with per-annotator
+reliability gating (Daniel et al. 2018, doi:10.1145/3148148; Snow et al. 2008 — aggregated crowd
+can approach expert quality only with these controls). Building that UI is out of scope for the
+measurement library; the contract is the deliverable.
+
+**The caveat is now CONDITIONAL, not deleted (honest surface).** Without `--human-labels`, the
+model-jury proxy path and the loud `_ALT_TEST_CAVEAT` both stand — ω stays circular and says so.
+With `--human-labels` (validated ≥3 annotators / ≥30 items), the report stamps
+`alt_test_reference: "human"`, ω is the audit-ready procedure, the human IAA + ε + DISPUTED
+items are recorded, and the circular caveat is replaced with a grounded note. ω retires the
+circularity *exactly when humans are present* — never silently. Until a human-labeling round
+runs, the §12.1 seats remain provisional as stated; Fork C makes the instrument that ends that
+provisionality, and a synthetic-label test suite proves the path end to end.
+
+**Standards compliance (the six).** PIN_PER_STEP — the human path is pinned by the verbatim
+`human_labels.json` schema + per-tier ε + BY-FDR q; pure/deterministic → replayable.
+ANDON_AUTHORITY — the loader hard-errors on <3 annotators / unknown item / unknown tier; the
+gates halt on regression. NAMED_COMPENSATORS — no new irreversible call (the commit/push
+compensators in the kickoff govern). DECOMPOSE_BY_SECRETS — the human-label module is isolated
+from the item set and from the model-jury path. UNCERTAINTY_GATED_HUMANS — Fork C is the
+uncertainty gate: the seat trust is gated on a *human* substitution test, with ε giving
+benefit-of-doubt and DISPUTED items escalated/dropped rather than forced. EXTERNAL_VERIFIER —
+Fork C's entire purpose is replacing the same-population model jury with an independent human
+reference; its own citations were retrieval-oracle-verified, and a different agent runs the
+composed re-audit.
