@@ -60,6 +60,7 @@ Standards compliance (the six — workflow-standards.md)
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -103,6 +104,80 @@ def _extract_text(response: dict[str, Any]) -> str:
     if "response" in response:
         return str(response["response"])
     return ""
+
+
+def _first_token_logprob(response: dict[str, Any]) -> float | None:
+    """Pull the **first generated (verdict) token's** logprob out of an Ollama response.
+
+    Ollama returns per-token logprobs when the request carries ``logprobs: true``
+    (native ``/api/chat`` since v0.12.11) or ``top_logprobs`` (OpenAI-compatible
+    ``/v1/chat/completions``). The verdict a judge emits is its *first* content token —
+    ``A``/``B``, ``PASS``/``FAIL`` — so its logprob is the calibrated confidence in the
+    chosen verdict (§12: use the verdict-token logprob, NOT verbalized confidence).
+
+    This walks the shapes Ollama actually emits and returns the first token's
+    ``logprob`` (a float ≤ 0), or ``None`` when no logprob channel is present (the
+    documented fall-back: ``confidence`` stays ``None`` so a logprob-less server never
+    fabricates a number).
+
+    Shapes handled (first match wins):
+
+    * native chat:        ``{"logprobs": [{"token": ..., "logprob": ...}, ...]}``
+    * native (nested):    ``{"message": {"logprobs": [{"logprob": ...}, ...]}}``
+    * OpenAI-compatible:  ``{"choices": [{"logprobs": {"content": [{"logprob": ...}]}}]}``
+    """
+    # 1) native /api/chat: top-level "logprobs" is a list of per-token entries.
+    entries = response.get("logprobs")
+    # 2) native (nested under the message on some builds).
+    if entries is None:
+        message = response.get("message")
+        if isinstance(message, dict):
+            entries = message.get("logprobs")
+    if isinstance(entries, list) and entries:
+        return _logprob_of(entries[0])
+
+    # 3) OpenAI-compatible: choices[0].logprobs.content[0].logprob.
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        lp = choices[0].get("logprobs")
+        if isinstance(lp, dict):
+            content = lp.get("content")
+            if isinstance(content, list) and content:
+                return _logprob_of(content[0])
+
+    return None
+
+
+def _logprob_of(entry: Any) -> float | None:
+    """Read a numeric ``logprob`` off one per-token entry, else ``None``.
+
+    ``bool`` is rejected (it is an ``int`` subclass) so a stray ``True`` never becomes
+    ``1.0``; anything non-numeric or missing yields ``None`` (no fabricated confidence).
+    """
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("logprob")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _logprob_to_probability(logprob: float | None) -> float | None:
+    """Convert a verdict-token logprob to a probability in ``[0, 1]`` via ``exp``.
+
+    Ollama logprobs are natural-log probabilities (≤ 0), so ``p = exp(logprob)`` is the
+    model's probability mass on the chosen verdict token — a directly usable confidence
+    for ECE (§12). ``None`` in → ``None`` out (no logprob channel → no confidence). The
+    result is clamped to ``[0, 1]`` to absorb floating-point overshoot at ``logprob≈0``.
+    """
+    if logprob is None:
+        return None
+    prob = math.exp(logprob)
+    if prob < 0.0:
+        return 0.0
+    if prob > 1.0:
+        return 1.0
+    return prob
 
 
 class OllamaModel:
@@ -152,11 +227,22 @@ class OllamaModel:
     def _options(self) -> dict[str, Any]:
         """The pinned deterministic sampling options sent on every request (§11.2).
 
-        ``temperature=0`` (greedy) + a fixed ``seed`` + a fixed ``num_ctx``. Kept in
-        one place so the request path and the recorded ``metadata`` cannot drift —
-        :meth:`judge_item` stores exactly this dict, making the call replayable.
+        ``temperature=0`` (greedy) + a fixed ``seed`` + a fixed ``num_ctx``, plus the
+        per-token logprob request (``logprobs``/``top_logprobs``) Ollama honours since
+        v0.12.11 — :meth:`judge_item` reads the verdict-token logprob off the response
+        to set :attr:`JudgmentRecord.confidence` (§12). Kept in one place so the request
+        path and the recorded ``metadata`` cannot drift — :meth:`judge_item` stores
+        exactly this dict, making the call replayable (PIN_PER_STEP). Requesting logprobs
+        on every call is harmless to the text-only paths (:meth:`generate`/:meth:`judge`
+        ignore them) and keeps one pinned option set.
         """
-        return {"temperature": 0, "seed": self.seed, "num_ctx": self.num_ctx}
+        return {
+            "temperature": 0,
+            "seed": self.seed,
+            "num_ctx": self.num_ctx,
+            "logprobs": True,
+            "top_logprobs": 1,
+        }
 
     def pin_metadata(self) -> dict[str, Any]:
         """The PIN_PER_STEP provenance block stamped on characterization records.
@@ -217,6 +303,22 @@ class OllamaModel:
 
     # -- core completion ----------------------------------------------------- #
 
+    async def _complete_raw(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """Call Ollama chat with the pinned options and return the **raw response**.
+
+        Sends ``{model, messages, options}`` (options = :meth:`_options`, §11.2) to the
+        resolved client and returns the response mapping untouched, so a caller that
+        needs more than the text — :meth:`judge_item`, which reads the verdict-token
+        logprob for confidence (§12) — can inspect it. :meth:`complete` is the text-only
+        view over this one request path (no second model call).
+        """
+        client = self._resolve_client()
+        return await client(
+            model=self.model_id,
+            messages=messages,
+            options=self._options(),
+        )
+
     async def complete(self, messages: list[dict[str, Any]]) -> str:
         """Call Ollama chat with the pinned deterministic options and return the text.
 
@@ -226,13 +328,7 @@ class OllamaModel:
         ``OLLAMA_NUM_PARALLEL=1``) is the harness's responsibility — this method only
         guarantees a single request carries the replayable knobs.
         """
-        client = self._resolve_client()
-        response = await client(
-            model=self.model_id,
-            messages=messages,
-            options=self._options(),
-        )
-        return _extract_text(response)
+        return _extract_text(await self._complete_raw(messages))
 
     # -- kernel generate plug (§10.2) --------------------------------------- #
 
@@ -313,14 +409,22 @@ class OllamaModel:
     ) -> JudgmentRecord:
         """Run one calibration item → a :class:`JudgmentRecord` (the §11.1 metric unit).
 
-        Sends ``prompt`` as a single user turn, records the model's prediction and the
-        measured latency, and returns a record stamped with ``model_id`` / ``family`` /
-        ``quant`` plus the PIN_PER_STEP provenance in ``metadata`` (so the profile run
-        is replayable, §11.6). ``gold`` and ``correct`` are left ``None`` — they are
-        filled later by the scorer that holds the gold labels (DECOMPOSE_BY_SECRETS:
-        labels live with the grader, never the profiled model, §11.6). ``run_index``
-        drives test-retest consistency and ``position`` drives position-swap bias
-        (§11.1 metrics 4 and 6).
+        Sends ``prompt`` as a single user turn, records the model's prediction, the
+        measured latency, and the **verdict-token logprob → confidence** (§12), and
+        returns a record stamped with ``model_id`` / ``family`` / ``quant`` plus the
+        PIN_PER_STEP provenance in ``metadata`` (so the profile run is replayable,
+        §11.6). ``gold`` and ``correct`` are left ``None`` — they are filled later by the
+        scorer that holds the gold labels (DECOMPOSE_BY_SECRETS: labels live with the
+        grader, never the profiled model, §11.6). ``run_index`` drives test-retest
+        consistency and ``position`` drives position-swap bias (§11.1 metrics 4 and 6).
+
+        Confidence (§12, the metric the first run couldn't compute): the request pins
+        ``logprobs``/``top_logprobs`` (:meth:`_options`); the **first generated token** is
+        the verdict (``A``/``B`` / ``PASS``/``FAIL``), so ``exp`` of its logprob is the
+        model's probability mass on the verdict it chose — a calibrated confidence for
+        ECE. Per §12 this is the verdict-token logprob, **not** a verbalized number. If
+        the server returns no logprob channel (older Ollama, OpenAI-compat with logprobs
+        off), ``confidence`` stays ``None`` rather than fabricating a value.
 
         Args:
             prompt: the calibration item text shown to the model.
@@ -328,19 +432,23 @@ class OllamaModel:
             position: option-order slot for position-swap bias (e.g. 0/1), or ``None``.
 
         Returns:
-            A :class:`JudgmentRecord` with ``predicted`` set, ``gold``/``correct``
-            ``None``, ``latency_s`` measured, and ``metadata`` carrying the pin block.
+            A :class:`JudgmentRecord` with ``predicted`` set, ``confidence`` from the
+            verdict-token logprob (or ``None``), ``gold``/``correct`` ``None``,
+            ``latency_s`` measured, and ``metadata`` carrying the pin block.
         """
         messages = [{"role": "user", "content": prompt}]
         start = time.monotonic()
-        predicted = await self.complete(messages)
+        response = await self._complete_raw(messages)
         latency_s = time.monotonic() - start
+        predicted = _extract_text(response)
+        confidence = _logprob_to_probability(_first_token_logprob(response))
         return JudgmentRecord(
             item_id=_item_id(prompt),
             model_id=self.model_id,
             predicted=predicted,
             gold=None,
             quant=self.quant,
+            confidence=confidence,
             latency_s=latency_s,
             run_index=run_index,
             position=position,

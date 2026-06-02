@@ -17,6 +17,12 @@ from pathlib import Path
 
 import pytest
 
+from crucible.calibration.irt import (
+    IRTError,
+    fit_irt_bayesian,
+    point_biserial,
+    prune_items,
+)
 from crucible.calibration.known_groups import (
     KnownGroupsResult,
     check_known_groups,
@@ -28,7 +34,9 @@ from crucible.calibration.loader import (
 )
 from crucible.calibration.types import CalibrationCategory, CalibrationItem
 
-ITEMS_DIR = Path(__file__).resolve().parents[1] / "src" / "crucible" / "calibration" / "items"
+_CALIB_DIR = Path(__file__).resolve().parents[1] / "src" / "crucible" / "calibration"
+ITEMS_DIR = _CALIB_DIR / "items"
+ADMISSION_PAIRS = _CALIB_DIR / "admission_pairs.json"
 
 
 # --------------------------------------------------------------------------- #
@@ -329,6 +337,225 @@ def test_test_retest_is_noted_not_failed() -> None:
     result = check_known_groups(items, outcomes)
     notes = result.by_category["test_retest"]["notes"]
     assert any("measured elsewhere" in n for n in notes)
+
+
+# --------------------------------------------------------------------------- #
+# admission_pairs.json — the discriminating PAIR-SET (§12, Q1) loads + validates
+# --------------------------------------------------------------------------- #
+
+
+def test_admission_pairs_load_via_loader() -> None:
+    """The pair-set round-trips through the existing loader into CalibrationItems."""
+    items = load_items(ADMISSION_PAIRS)
+    assert all(isinstance(it, CalibrationItem) for it in items)
+    # §12: 40–60 plausible-vs-subtly-wrong pairs (replaces the saturating 20-item set).
+    assert 40 <= len(items) <= 60
+    assert len({it.id for it in items}) == len(items), "pair ids must be unique"
+
+
+def test_admission_pairs_gold_is_a_or_b() -> None:
+    """Every pair's gold is the correct CHOICE — 'A' or 'B' (JudgeBench pair form)."""
+    items = load_items(ADMISSION_PAIRS)
+    assert {it.gold for it in items} == {"A", "B"}
+    # both sides are used as the correct one (so position can't be learned as skill).
+    golds = [it.gold for it in items]
+    assert golds.count("A") >= 1 and golds.count("B") >= 1
+
+
+def test_admission_pairs_categories_are_diagnostic_or_anchor() -> None:
+    """§12: items live in known_diagnostic / difficulty_anchor."""
+    items = load_items(ADMISSION_PAIRS)
+    cats = {it.category for it in items}
+    assert cats <= {
+        CalibrationCategory.KNOWN_DIAGNOSTIC,
+        CalibrationCategory.DIFFICULTY_ANCHOR,
+    }
+    # the discriminating core is diagnostic; anchors give the easy/hard tails.
+    assert CalibrationCategory.KNOWN_DIAGNOSTIC in cats
+
+
+def test_admission_pairs_present_two_candidates_and_ask_for_a_letter() -> None:
+    """Each prompt shows BOTH candidates and asks for exactly one letter (A/B)."""
+    items = load_items(ADMISSION_PAIRS)
+    for it in items:
+        assert "Candidate A:" in it.prompt, it.id
+        assert "Candidate B:" in it.prompt, it.id
+        assert "A or B" in it.prompt, it.id
+
+
+def test_admission_pairs_span_a_difficulty_range() -> None:
+    """§12: target a SPREAD (PSN-IRT), not a pile of traps — near-obvious to subtle."""
+    items = load_items(ADMISSION_PAIRS)
+    diffs = [it.difficulty for it in items if it.difficulty is not None]
+    assert len(diffs) >= len(items) - 1, "items should carry a difficulty hint"
+    assert min(diffs) <= 0.2, "needs a near-obvious tail"
+    assert max(diffs) >= 0.7, "needs a subtle tail"
+    # centred in the discriminating band (~0.5–0.65 per §12), not bunched at an extreme.
+    assert 0.4 <= (sum(diffs) / len(diffs)) <= 0.65
+
+
+def test_admission_pairs_known_groups_clean() -> None:
+    """The pair-set passes the known-groups laws on a monotone outcome set (instrument
+    valid): strong passes the discriminating items, weak passes only the easy ones."""
+    items = load_items(ADMISSION_PAIRS)
+    outcomes = {
+        it.id: {
+            "weak": (it.difficulty is not None and it.difficulty < 0.4),
+            "strong": True,
+        }
+        for it in items
+    }
+    result = check_known_groups(items, outcomes)
+    assert result.passed, result.violations
+
+
+# --------------------------------------------------------------------------- #
+# IRT discrimination screen (§12) — point_biserial math
+# --------------------------------------------------------------------------- #
+
+
+def test_point_biserial_perfect_discrimination() -> None:
+    """Right-on-item perfectly ordered with ability → r_pb near +1."""
+    # weak two fail, strong two pass; totals increasing with ability.
+    r = point_biserial([0, 0, 1, 1], [1.0, 2.0, 3.0, 4.0])
+    assert r == pytest.approx(0.894, abs=1e-3)
+    assert r > 0.8
+
+
+def test_point_biserial_anti_discrimination_is_negative() -> None:
+    """An item the WEAK models pass and strong fail → negative discrimination."""
+    r = point_biserial([1, 1, 0, 0], [1.0, 2.0, 3.0, 4.0])
+    assert r < -0.8
+
+
+def test_point_biserial_no_item_variance_is_zero() -> None:
+    """All-correct (or all-wrong) item: discrimination undefined → reported 0.0."""
+    assert point_biserial([1, 1, 1, 1], [1.0, 2.0, 3.0, 4.0]) == 0.0
+    assert point_biserial([0, 0, 0, 0], [1.0, 2.0, 3.0, 4.0]) == 0.0
+
+
+def test_point_biserial_no_total_variance_is_zero() -> None:
+    """Flat ability (all totals equal): nothing to correlate against → 0.0."""
+    assert point_biserial([0, 1, 0, 1], [2.0, 2.0, 2.0, 2.0]) == 0.0
+
+
+def test_point_biserial_length_mismatch_raises() -> None:
+    with pytest.raises(IRTError, match="LENGTH_MISMATCH"):
+        point_biserial([1, 0, 1], [1.0, 2.0])
+
+
+def test_point_biserial_single_respondent_is_zero() -> None:
+    """Fewer than two respondents can't define a correlation → 0.0 (not a crash)."""
+    assert point_biserial([1], [3.0]) == 0.0
+
+
+# --------------------------------------------------------------------------- #
+# IRT discrimination screen (§12) — prune_items drops saturated + flat, keeps disc
+# --------------------------------------------------------------------------- #
+
+
+def _ladder_matrix() -> dict[str, dict[str, bool]]:
+    """A 6-model response matrix with a clean latent-ability ladder.
+
+    Five Guttman-style ``rung*`` items establish a real ability gradient (m1 weakest →
+    m6 strongest) so the corrected item-total is a valid ability proxy. Three probe items
+    exercise each prune branch:
+
+    * ``sat``  — every model correct → zero verdict variance (SATURATED) → DROP.
+    * ``flat`` — alternating right/wrong, uncorrelated with ability (r_pb<0.1) → DROP.
+    * ``disc`` — only the strong half pass → tracks ability (high r_pb) → KEEP.
+    """
+    models = ["m1", "m2", "m3", "m4", "m5", "m6"]
+    columns = {
+        "rung1": [True, True, True, True, True, False],
+        "rung2": [False, True, True, True, True, True],
+        "rung3": [False, False, True, True, True, True],
+        "rung4": [False, False, False, True, True, True],
+        "rung5": [False, False, False, False, True, True],
+        "sat": [True, True, True, True, True, True],
+        "flat": [True, False, True, False, True, False],
+        "disc": [False, False, False, True, True, True],
+    }
+    return {m: {item: col[i] for item, col in columns.items()} for i, m in enumerate(models)}
+
+
+def test_prune_drops_saturated_item() -> None:
+    """A saturated (all-correct) item has zero variance and is dropped (§12 failure)."""
+    kept, dropped = prune_items(_ladder_matrix())
+    assert "sat" in dropped
+    assert "sat" not in kept
+
+
+def test_prune_drops_zero_discrimination_item() -> None:
+    """An item uncorrelated with ability (point-biserial below floor) is dropped."""
+    kept, dropped = prune_items(_ladder_matrix())
+    assert "flat" in dropped
+    assert "flat" not in kept
+
+
+def test_prune_keeps_discriminating_item() -> None:
+    """An item that tracks ability (high point-biserial) is kept."""
+    kept, dropped = prune_items(_ladder_matrix())
+    assert "disc" in kept
+    assert "disc" not in dropped
+
+
+def test_prune_partition_is_complete_and_disjoint() -> None:
+    """kept ∪ dropped = all items, and the two are disjoint."""
+    matrix = _ladder_matrix()
+    kept, dropped = prune_items(matrix)
+    all_items = set(next(iter(matrix.values())))
+    assert set(kept) | set(dropped) == all_items
+    assert set(kept).isdisjoint(dropped)
+
+
+def test_prune_min_variance_threshold_prunes_near_saturated() -> None:
+    """Raising min_variance prunes a barely-split item (1/6 wrong, var≈0.139)."""
+    matrix = _ladder_matrix()
+    # rung1 is wrong for exactly one model → low but non-zero variance.
+    lenient_kept, _ = prune_items(matrix, min_variance=0.0, min_point_biserial=-1.0)
+    strict_kept, strict_dropped = prune_items(
+        matrix, min_variance=0.15, min_point_biserial=-1.0
+    )
+    assert "rung1" in lenient_kept
+    assert "rung1" in strict_dropped
+    assert "rung1" not in strict_kept
+
+
+def test_prune_point_biserial_threshold_is_respected() -> None:
+    """A high min_point_biserial drops a weakly-discriminating but-variable item."""
+    matrix = _ladder_matrix()
+    # With an impossibly high r_pb floor, even 'disc' fails the discrimination bar.
+    kept, dropped = prune_items(matrix, min_variance=0.0, min_point_biserial=0.99)
+    assert "disc" in dropped
+
+
+def test_prune_empty_matrix_raises() -> None:
+    with pytest.raises(IRTError, match="EMPTY_MATRIX"):
+        prune_items({})
+
+
+def test_prune_ragged_matrix_raises() -> None:
+    """Models scored on different item sets is a structural error, not a silent skip."""
+    with pytest.raises(IRTError, match="RAGGED_MATRIX"):
+        prune_items({"a": {"i1": True, "i2": False}, "b": {"i1": True, "i3": False}})
+
+
+def test_prune_items_no_items_raises() -> None:
+    with pytest.raises(IRTError, match="EMPTY_ITEMS"):
+        prune_items({"a": {}, "b": {}})
+
+
+# --------------------------------------------------------------------------- #
+# IRT — Bayesian path is a lazy optional (py-irt); raises a clear NotImplementedError
+# --------------------------------------------------------------------------- #
+
+
+def test_fit_irt_bayesian_raises_not_implemented() -> None:
+    """py-irt is not a hard dep; the Bayesian path documents itself via NotImplementedError
+    (§12 secondary screen; the model-free prune is primary)."""
+    with pytest.raises(NotImplementedError, match="py-irt"):
+        fit_irt_bayesian(_ladder_matrix())
 
 
 # --------------------------------------------------------------------------- #

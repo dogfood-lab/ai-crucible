@@ -212,6 +212,9 @@ def test_ollama_judge_item_returns_record() -> None:
     # gold/correct are filled later by the scorer that holds the labels (§11.6).
     assert record.gold is None
     assert record.correct is None
+    # The base fake returns no logprob channel → confidence stays None, never fabricated
+    # (§12: confidence comes from the verdict-token logprob, else None).
+    assert record.confidence is None
     assert record.latency_s >= 0.0
     # PIN_PER_STEP: the metadata makes the profile run replayable.
     assert record.metadata["model_id"] == "qwen3:32b"
@@ -243,6 +246,134 @@ def test_judge_item_id_is_stable_for_same_prompt() -> None:
     r1 = asyncio.run(model.judge_item("identical prompt"))
     r2 = asyncio.run(model.judge_item("identical prompt"))
     assert r1.item_id == r2.item_id
+
+
+# --------------------------------------------------------------------------- #
+# Verdict-token logprob → JudgmentRecord.confidence (§12 — the metric the first
+# characterization run could not compute). confidence = exp(first-token logprob);
+# None when the server returns no logprob channel. Every client is faked (no network).
+# --------------------------------------------------------------------------- #
+
+
+class FakeLogprobClient:
+    """Ollama native ``/api/chat`` fake that ALSO returns per-token ``logprobs``.
+
+    Shape: ``{"message": {...}, "logprobs": [{"token", "logprob"}, ...]}`` — the native
+    shape Ollama emits with ``logprobs: true`` since v0.12.11. The first entry is the
+    verdict token, so its ``logprob`` drives confidence.
+    """
+
+    def __init__(self, content: str, first_logprob: float) -> None:
+        self.content = content
+        self.first_logprob = first_logprob
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return {
+            "message": {"role": "assistant", "content": self.content},
+            "logprobs": [
+                {"token": self.content[:1] or " ", "logprob": self.first_logprob},
+                {"token": "x", "logprob": -3.0},
+            ],
+        }
+
+
+class FakeNestedLogprobClient:
+    """Native fake with ``logprobs`` nested under ``message`` (some Ollama builds)."""
+
+    def __init__(self, content: str, first_logprob: float) -> None:
+        self.content = content
+        self.first_logprob = first_logprob
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "message": {
+                "role": "assistant",
+                "content": self.content,
+                "logprobs": [{"token": self.content[:1], "logprob": self.first_logprob}],
+            }
+        }
+
+
+class FakeOpenAILogprobClient:
+    """OpenAI-compatible fake: ``choices[0].logprobs.content[0].logprob``."""
+
+    def __init__(self, content: str, first_logprob: float) -> None:
+        self.content = content
+        self.first_logprob = first_logprob
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        token = {"token": self.content[:1], "logprob": self.first_logprob}
+        return {
+            "message": {"role": "assistant", "content": self.content},
+            "choices": [{"logprobs": {"content": [token]}}],
+        }
+
+
+def test_judge_item_confidence_from_native_logprob() -> None:
+    """confidence = exp(verdict-token logprob) on the native /api/chat shape (§12)."""
+    import math
+
+    client = FakeLogprobClient("A", first_logprob=-0.105360516)  # exp(...) ≈ 0.90
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    record = asyncio.run(model.judge_item("Q: which? A or B"))
+
+    assert record.predicted == "A"
+    assert record.confidence is not None
+    assert record.confidence == pytest.approx(math.exp(-0.105360516))
+    assert record.confidence == pytest.approx(0.9, abs=1e-3)
+    # the request actually asked for logprobs (PIN_PER_STEP — pinned in the options).
+    assert client.calls[0]["options"]["logprobs"] is True
+    assert client.calls[0]["options"]["top_logprobs"] == 1
+
+
+def test_judge_item_confidence_from_nested_logprob() -> None:
+    """A confident verdict (logprob≈0) → confidence≈1.0; nested-under-message shape."""
+    client = FakeNestedLogprobClient("B", first_logprob=0.0)
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    record = asyncio.run(model.judge_item("pick A or B"))
+
+    assert record.predicted == "B"
+    assert record.confidence == pytest.approx(1.0)
+
+
+def test_judge_item_confidence_from_openai_logprob() -> None:
+    """confidence is also read from the OpenAI-compatible logprobs shape (§12)."""
+    import math
+
+    client = FakeOpenAILogprobClient("PASS", first_logprob=-0.6931472)  # exp ≈ 0.5
+    model = OllamaModel("mistral-small:24b", family="mistral", client=client)
+
+    record = asyncio.run(model.judge_item("grade: PASS or FAIL"))
+
+    assert record.predicted == "PASS"
+    assert record.confidence == pytest.approx(math.exp(-0.6931472))
+    assert record.confidence == pytest.approx(0.5, abs=1e-3)
+
+
+def test_judge_item_confidence_none_when_logprobs_absent() -> None:
+    """No logprob channel (older server / logprobs off) → confidence is None, not faked."""
+    client = FakeOllamaClient("A")  # base fake: message only, no logprobs
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    record = asyncio.run(model.judge_item("Q: which? A or B"))
+
+    assert record.predicted == "A"
+    assert record.confidence is None
+
+
+def test_judge_item_confidence_clamped_to_unit_interval() -> None:
+    """A tiny positive logprob (fp noise at ≈0) clamps to ≤ 1.0, never overshoots."""
+    client = FakeLogprobClient("A", first_logprob=1e-9)  # exp ≈ 1.000000001
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    record = asyncio.run(model.judge_item("A or B"))
+
+    assert record.confidence is not None
+    assert 0.0 <= record.confidence <= 1.0
 
 
 # --------------------------------------------------------------------------- #

@@ -40,14 +40,20 @@ from crucible.characterize.metrics import (
     agreement,
     alt_test_omega,
     consistency,
+    difficulty_weighted_accuracy,
     expected_calibration_error,
     family_pref_delta,
     kappa_zscore,
     objective_accuracy,
     position_bias,
+    quality_score,
     verbosity_bias,
 )
-from crucible.characterize.profile import SeatGates, build_profile
+from crucible.characterize.profile import (
+    SeatGates,
+    build_profile,
+    perturbation_audit,
+)
 from crucible.characterize.types import (
     JudgeProfile,
     JudgmentRecord,
@@ -117,6 +123,35 @@ def strong_judge_records(
             run_index=run,
         )
         for run in range(3)
+        for i in range(n)
+    ]
+
+
+def super_consistent_records(n: int = 60) -> list[JudgmentRecord]:
+    """A super-consistent judge: PERFECT agreement (κ=1.0, z>1) over ``n`` items, 3 passes.
+
+    This is exactly the case the OLD two-sided gate inverted — it screened this judge as
+    "supra-human". Under the §12 one-sided gate (Han 2025 Tier-1B) it SEATS with a review
+    flag. Three identical ``run_index`` passes make test-retest consistency perfect too.
+    """
+    gold = _gold(n)
+    return [
+        rec(f"i{i}", gold[i], gold[i], run_index=run)
+        for run in range(3)
+        for i in range(n)
+    ]
+
+
+def below_floor_kappa_records(n: int = 60) -> list[JudgmentRecord]:
+    """A judge that correlates on the scale (high Pearson r) but whose categorical κ sits
+    BELOW the one-sided human floor — it should REJECT on the κ floor (not merely screen).
+
+    Off-by-one on ~half the items keeps r high (~0.94, monotone) while dragging κ to ~0.5,
+    which is below the ``0.80 − 1.96·SE`` one-sided floor — the §12 hard agreement gate.
+    """
+    gold = _gold(n)
+    return [
+        rec(f"i{i}", (gold[i] if i % 2 == 0 else min(5, gold[i] + 1)), gold[i])
         for i in range(n)
     ]
 
@@ -194,15 +229,21 @@ def test_agreement_non_numeric_raises() -> None:
 
 
 def test_kappa_zscore_human_like_band() -> None:
-    """A judge whose κ sits near the human baseline is 'human-like' (|z| < 1);
-    a κ far above the baseline is flagged NON-human (the two-gate subtlety)."""
+    """The signed κ z-score: a judge whose κ sits near the human baseline has |z| < 1;
+    a κ far above the baseline has z > 1 ('super-consistent').
+
+    Note the §12 reversal lives in the *profile* layer, not here: this metric just reports
+    the signed z. Under §12 a z > 1 judge is Tier-1B (Han 2025) — it SEATS with a review
+    flag (see ``test_build_profile_seats_super_consistent_judge_with_review_flag``); the
+    old two-sided ``|z| < 1`` screen was the inversion that has been removed."""
     n = 60
-    # κ = 0.82 vs baseline 0.80 over 60 items → small |z|.
+    # κ = 0.82 vs baseline 0.80 over 60 items → small |z| (human-like).
     z_close = kappa_zscore(0.82, 0.80, n)
     assert abs(z_close) < 1.0
-    # κ = 1.0 (agrees with gold far more than humans agree with each other) → |z| ≥ 1.
+    # κ = 1.0 (agrees with gold far more than humans agree with each other) → z > 1
+    # (super-consistent → review flag in the gate, NOT a screen).
     z_far = kappa_zscore(1.0, 0.80, n)
-    assert abs(z_far) >= 1.0
+    assert z_far > 1.0
 
 
 def test_kappa_zscore_degenerate_baseline_returns_zero() -> None:
@@ -306,9 +347,16 @@ def test_ece_high_for_overconfident_wrong_judge() -> None:
     assert expected_calibration_error(records) == pytest.approx(0.95, abs=1e-9)
 
 
-def test_ece_requires_a_confidence() -> None:
-    with pytest.raises(ValueError, match="at least one record with a confidence"):
-        expected_calibration_error([rec("i0", 1, 1)])
+def test_ece_returns_none_without_confidence() -> None:
+    """§12: ECE returns ``None`` ('calibration not measured') — NOT an error — when no
+    record carries a confidence. The verbalized number is untrustworthy (Xiong 2024) and
+    the logprob/vote-fraction channel may simply not be wired this run, so a missing
+    confidence signal must not fail a judge (the gate treats None as a neutral)."""
+    assert expected_calibration_error([rec("i0", 1, 1)]) is None
+    # A mix where *some* records carry a confidence still computes (the None-confidence
+    # records are ignored, the rest scored).
+    mixed = [rec("i0", 1, 1, confidence=0.5), rec("i1", 0, 1)]
+    assert expected_calibration_error(mixed) is not None
 
 
 def test_ece_rejects_out_of_range_confidence() -> None:
@@ -446,22 +494,38 @@ def test_build_profile_screens_when_alt_test_fails_only() -> None:
     assert any("ω<0.50" in note for note in screened.notes)
 
 
-def test_build_profile_screens_on_high_bias() -> None:
-    """A judge that clears accuracy + agreement but is position-decided (bias over the
-    ceiling) is SCREENed, not SEATed — proving the §11.1 #6 bias gate bites."""
+def test_build_profile_bias_penalizes_quality_score() -> None:
+    """§12: bias is folded into the continuous quality score (a multiplicative penalty),
+    NOT a discrete SCREEN gate. A position-decided judge has its score dragged down by the
+    bias penalty; holding everything else fixed, a high-bias judge scores strictly below
+    its low-bias twin and the selective CI decision moves accordingly (here: below the
+    floor → REJECT, proving the penalty bites)."""
     gold = _gold(40)
-    records: list[JudgmentRecord] = []
+    biased: list[JudgmentRecord] = []
+    clean: list[JudgmentRecord] = []
     for i in range(40):
         g = gold[i]
         p = min(5, g + 1) if i % 6 == 0 else g
-        # Position-swap trials: half the items flip with position → position_bias high.
-        records.append(rec(f"i{i}", p, g, position=0, run_index=0))
-        flip = (min(5, g + 1) if i % 2 == 0 else p)
-        records.append(rec(f"i{i}", flip, g, position=1, run_index=0))
-    profile = build_profile("biased", RoleSlot.JUDGE, records, human_human_kappa=0.80)
-    assert profile.position_bias is not None and profile.position_bias >= 0.25
-    assert profile.seat_decision is SeatDecision.SCREEN
-    assert any("bias over ceiling" in note for note in profile.notes)
+        # Biased judge: half the items flip their verdict with the position swap.
+        biased.append(rec(f"i{i}", p, g, position=0, run_index=0))
+        flip = min(5, g + 1) if i % 2 == 0 else p
+        biased.append(rec(f"i{i}", flip, g, position=1, run_index=0))
+        # Clean twin: identical verdicts, position-invariant (no bias).
+        clean.append(rec(f"i{i}", p, g, position=0, run_index=0))
+        clean.append(rec(f"i{i}", p, g, position=1, run_index=0))
+
+    biased_p = build_profile("biased", RoleSlot.JUDGE, biased, human_human_kappa=0.80)
+    clean_p = build_profile("clean", RoleSlot.JUDGE, clean, human_human_kappa=0.80)
+
+    assert biased_p.position_bias is not None and biased_p.position_bias >= 0.25
+    assert clean_p.position_bias == 0.0
+    # The bias penalty strictly lowers the continuous score (§12 quality_score).
+    assert (
+        biased_p.metadata["quality_score"] < clean_p.metadata["quality_score"]
+    )
+    # And it moves the selective decision: the biased judge no longer seats.
+    assert biased_p.seat_decision is not SeatDecision.SEAT
+    assert any("bias" in note for note in biased_p.notes)
 
 
 def test_build_profile_empty_records_raises() -> None:
@@ -477,6 +541,241 @@ def test_seat_gates_are_overridable_and_stamped() -> None:
     # r is high (~0.97) but below 0.999 → REJECT on the hard r gate.
     assert profile.seat_decision is SeatDecision.REJECT
     assert profile.metadata["thresholds"]["agreement_r"] == 0.999
+
+
+# --------------------------------------------------------------------------- #
+# §12 — the INVERTED-gate fix: super-consistent SEATs; one-sided κ floor;
+#       continuous quality score; selective CI decision; perturbation audit
+# --------------------------------------------------------------------------- #
+
+
+def test_build_profile_seats_super_consistent_judge_with_review_flag() -> None:
+    """THE §12 fix (flips the now-wrong test). A super-consistent judge — κ=1.0, z>1, i.e.
+    it agrees with gold MORE than humans agree with each other — is **SEATED** with a
+    ``review_flag``, NOT screened.
+
+    Han et al. 2025 ("Judge's Verdict", arXiv:2510.09738) classifies such judges as
+    **Tier-1B: valid, top-ranked, kept** — its own four highest-κ models are z>1. The old
+    two-sided ``|z| < 1`` gate screened exactly these (the first characterization run
+    wrongly screened the three κ=1.0 models); §12 reverses it to a one-sided floor. The
+    review flag is for *later* human review only (IF κ≈1.0 co-occurs with high human
+    disagreement) — it does not change the seat decision."""
+    records = super_consistent_records()
+    profile = build_profile("qwen3.6:27b", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    # The decisive assertion: κ=1.0 now SEATS (it used to SCREEN).
+    assert profile.seat_decision is SeatDecision.SEAT
+    assert profile.kappa_z > 1.0  # super-consistent, above the human baseline
+    # Seated WITH a review flag (a flag for later human review, not a downgrade).
+    assert profile.metadata["review_flag"] is True
+    assert "review_reason" in profile.metadata
+    assert profile.reliability_weight is not None and profile.reliability_weight > 0.5
+    # The notes must say it seated *because* it's Tier-1B, not despite it.
+    assert any("review_flag SET" in note for note in profile.notes)
+    assert any(
+        "SEAT" in note and "Tier-1B" in note for note in profile.notes
+    )
+
+
+def test_human_like_judge_seats_without_review_flag() -> None:
+    """Contrast: a judge whose κ sits *within* the human band (|z| < 1) also SEATS, but
+    with NO review flag — only the super-consistent upper tail is flagged."""
+    records = strong_judge_records()
+    gold = _gold(60)
+    rpa = annotators(lambda i: gold[i], lambda i: gold[i])
+    profile = build_profile(
+        "human-like", RoleSlot.JUDGE, records, human_human_kappa=0.80,
+        records_per_annotator=rpa,
+    )
+    assert profile.seat_decision is SeatDecision.SEAT
+    assert abs(profile.kappa_z) < 1.0
+    assert profile.metadata["review_flag"] is False
+    assert "review_reason" not in profile.metadata
+
+
+def test_build_profile_rejects_below_floor_kappa() -> None:
+    """§12 one-sided floor as a HARD gate: a judge that correlates on the rating scale
+    (high Pearson r) but whose categorical κ sits below ``baseline − margin`` is REJECTed
+    on the κ floor — high r alone does not save it (the floor is the §11.1 #2 second gate,
+    now one-sided rather than two-sided)."""
+    records = below_floor_kappa_records()
+    profile = build_profile("weakcat", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    assert profile.agreement_r is not None and profile.agreement_r >= 0.80  # r passes
+    assert profile.metadata["kappa"] < profile.metadata["kappa_one_sided_floor"]
+    assert profile.seat_decision is SeatDecision.REJECT
+    assert any("one-sided floor" in note for note in profile.notes)
+
+
+def test_one_sided_floor_does_not_screen_the_upper_tail() -> None:
+    """The directional property of the fix: raising κ from human-like to super-consistent
+    NEVER worsens the decision. A perfect judge does at least as well as a human-like one
+    (both SEAT) — proving the gate is one-sided (a ceiling would have flipped the perfect
+    judge to SCREEN, which was the bug)."""
+    human_like = build_profile(
+        "hl", RoleSlot.JUDGE, strong_judge_records(), human_human_kappa=0.80
+    )
+    super_c = build_profile(
+        "sc", RoleSlot.JUDGE, super_consistent_records(), human_human_kappa=0.80
+    )
+    assert human_like.seat_decision is SeatDecision.SEAT
+    assert super_c.seat_decision is SeatDecision.SEAT
+    # Higher κ ⇒ at least as high a quality score (monotone, never penalized for being
+    # "too good").
+    assert (
+        super_c.metadata["quality_score"] >= human_like.metadata["quality_score"]
+    )
+
+
+# --- §12 Q4: difficulty-normalized continuous quality score ------------------ #
+
+
+def test_difficulty_weighted_accuracy_unweighted_without_difficulty() -> None:
+    """With no ``metadata['difficulty']`` it degrades to plain accuracy (the trivial-anchor
+    path must not penalize the judge)."""
+    records = [rec("i0", 1, 1), rec("i1", 2, 2), rec("i2", 9, 3), rec("i3", 4, 4)]
+    assert difficulty_weighted_accuracy(records) == pytest.approx(0.75)
+    assert difficulty_weighted_accuracy(records) == objective_accuracy(records)
+
+
+def test_difficulty_weighted_accuracy_weights_hard_items() -> None:
+    """Getting the HARD item right is worth more than getting an easy one right — and
+    vice-versa — so the weighted accuracy differs from raw accuracy on a saturating-style
+    set (§12: raw accuracy is distorted on easy-only sets)."""
+    # Right on the easy item (w=1), wrong on the hard item (w=9): raw acc 0.5, but the
+    # hard miss dominates the weighted score → well below 0.5.
+    hard_miss = [
+        rec("easy", 1, 1, difficulty=1.0),
+        rec("hard", 9, 2, difficulty=9.0),
+    ]
+    assert objective_accuracy(hard_miss) == pytest.approx(0.5)
+    assert difficulty_weighted_accuracy(hard_miss) == pytest.approx(0.1)  # 1/(1+9)
+    # Mirror: right on the hard item, wrong on the easy one → weighted score well above.
+    hard_hit = [
+        rec("easy", 9, 1, difficulty=1.0),
+        rec("hard", 2, 2, difficulty=9.0),
+    ]
+    assert difficulty_weighted_accuracy(hard_hit) == pytest.approx(0.9)
+
+
+def test_quality_score_is_monotonic_in_accuracy() -> None:
+    """§12 Q4: the continuous quality score is non-decreasing in accuracy (the property the
+    selective-CI decision relies on — a higher accuracy bound ⇒ a higher score bound)."""
+    accs = [i / 20 for i in range(21)]  # 0.0 .. 1.0
+    scores = [
+        quality_score(
+            accuracy=a, agreement_r=0.9, consistency=1.0, ece=None, max_bias=0.0
+        )
+        for a in accs
+    ]
+    assert scores == sorted(scores)  # monotone non-decreasing
+    assert scores[0] >= 0.0 and scores[-1] <= 1.0  # bounded
+
+
+def test_quality_score_penalties_lower_the_score() -> None:
+    """ECE (past the soft ceiling) and bias each strictly lower the score; ECE=None applies
+    no calibration penalty (§12)."""
+    base = quality_score(
+        accuracy=0.9, agreement_r=0.9, consistency=1.0, ece=None, max_bias=0.0
+    )
+    with_bias = quality_score(
+        accuracy=0.9, agreement_r=0.9, consistency=1.0, ece=None, max_bias=0.4
+    )
+    with_ece = quality_score(
+        accuracy=0.9, agreement_r=0.9, consistency=1.0, ece=0.6, max_bias=0.0
+    )
+    assert with_bias < base
+    assert with_ece < base
+    # ECE below the soft ceiling applies no penalty (calibration is soft, §11.1).
+    calibrated = quality_score(
+        accuracy=0.9, agreement_r=0.9, consistency=1.0, ece=0.05, max_bias=0.0
+    )
+    assert calibrated == pytest.approx(base)
+
+
+# --- §12: selective (CI-based) seat / screen / reject ------------------------ #
+
+
+def test_selective_decision_screens_on_straddling_ci() -> None:
+    """§12 selective decision: when the quality-score CI STRADDLES the floor (genuine
+    uncertainty, not failure), the judge SCREENS rather than being forced to a pass/fail.
+
+    A short, mid-rate set gives a wide accuracy CI; choosing a floor that lands inside the
+    score CI exercises the straddle → SCREEN (escalate, Jung 2024)."""
+    # 12 items, ~75% correct → wide Wilson CI on accuracy → wide score CI.
+    gold = _gold(12)
+    records = [
+        rec(f"i{i}", (gold[i] if i % 4 != 0 else min(5, gold[i] + 1)), gold[i])
+        for i in range(12)
+    ]
+    point = build_profile("mid", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    lo, hi = point.metadata["score_ci"]
+    # Place the floor strictly inside the score CI → the CI straddles it.
+    straddle_floor = (lo + hi) / 2
+    gates = SeatGates(quality_floor=straddle_floor)
+    profile = build_profile("mid", RoleSlot.JUDGE, records, human_human_kappa=0.80, gates=gates)
+    assert profile.seat_decision is SeatDecision.SCREEN
+    s_lo, s_hi = profile.metadata["score_ci"]
+    assert s_lo < straddle_floor <= s_hi  # the defining straddle condition
+    assert any("straddles" in note for note in profile.notes)
+
+
+def test_selective_decision_seat_screen_reject_by_floor() -> None:
+    """Sweeping only the floor across the same judge's fixed score CI walks the decision
+    SEAT → SCREEN → REJECT, proving the selective rule is the CI-vs-floor comparison."""
+    records = strong_judge_records()
+    base = build_profile("q", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    lo, hi = base.metadata["score_ci"]
+
+    seat = build_profile(
+        "q", RoleSlot.JUDGE, records, human_human_kappa=0.80,
+        gates=SeatGates(quality_floor=max(0.01, lo - 0.05)),  # floor below CI → SEAT
+    )
+    screen = build_profile(
+        "q", RoleSlot.JUDGE, records, human_human_kappa=0.80,
+        gates=SeatGates(quality_floor=(lo + hi) / 2),         # floor inside CI → SCREEN
+    )
+    reject = build_profile(
+        "q", RoleSlot.JUDGE, records, human_human_kappa=0.80,
+        gates=SeatGates(quality_floor=min(1.0, hi + 0.05)),   # floor above CI → REJECT
+    )
+    assert seat.seat_decision is SeatDecision.SEAT
+    assert screen.seat_decision is SeatDecision.SCREEN
+    assert reject.seat_decision is SeatDecision.REJECT
+
+
+# --- §12 / §8.3: perturbation audit (Alzahrani lens on the admission gate) --- #
+
+
+def test_perturbation_audit_reports_flip_rate_stable_decision() -> None:
+    """A rock-solid seat (perfect judge) does not flip under ±1 SE threshold jitter →
+    flip_rate 0.0 over a full ±SE sweep of every threshold (§12 / Alzahrani 2024)."""
+    records = super_consistent_records()
+    audit = perturbation_audit(records, human_human_kappa=0.80)
+    assert audit["baseline_decision"] == "seat"
+    assert audit["flip_rate"] == 0.0
+    assert audit["n_perturbations"] > 0
+    assert audit["flips"] == []
+
+
+def test_perturbation_audit_detects_fragile_decision() -> None:
+    """RED-ish proof: when a threshold is parked right at the decision boundary, jitter
+    flips the decision → a non-zero flip_rate that names the fragile knob (the andon
+    signal §12 wants — a brittle admission threshold is measuring noise, not the judge)."""
+    records = strong_judge_records()
+    base = build_profile("q", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    lo, _hi = base.metadata["score_ci"]
+    # Park the quality floor exactly on the CI lower bound: a downward nudge seats, an
+    # upward nudge screens → the decision is fragile to floor jitter.
+    knife_edge = SeatGates(quality_floor=lo)
+    audit = perturbation_audit(
+        records, human_human_kappa=0.80, gates=knife_edge
+    )
+    assert audit["flip_rate"] > 0.0
+    assert any(f["threshold"] == "quality_floor" for f in audit["flips"])
+
+
+def test_perturbation_audit_empty_records_raises() -> None:
+    with pytest.raises(ValueError, match="at least one JudgmentRecord"):
+        perturbation_audit([])
 
 
 # --------------------------------------------------------------------------- #

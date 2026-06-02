@@ -1,4 +1,4 @@
-"""The six judge-admission metrics (research-grounding §11.1).
+"""The judge-admission metrics (research-grounding §11.1, recalibrated by §12).
 
 Each function is a **pure, deterministic** reduction over a ``list[JudgmentRecord]``
 — same records grade identically tomorrow (the §1 "live external dependencies are
@@ -7,6 +7,22 @@ measurement primitives the §11.1 *seat-or-screen* admission test is built on; t
 gate logic that turns these numbers into a :class:`~crucible.characterize.types.SeatDecision`
 lives in :mod:`crucible.characterize.profile`, and the panel-level aggregation in
 :mod:`crucible.characterize.aggregate`.
+
+**§12 calibration redesign (2026-06-01, after the first characterization run).** The
+first run self-diagnosed two defects this module + the gate layer now fix:
+
+* The κ two-gate was **INVERTED** — it screened super-consistent judges (κ above the
+  human baseline, z>1) when Han et al. 2025 ("Judge's Verdict", arXiv:2510.09738)
+  keeps them as **Tier-1B: valid, top-ranked, seated**. The gate becomes a *one-sided
+  floor* (see :mod:`crucible.characterize.profile`); :func:`kappa_zscore` still reports
+  the signed z (the profile layer reads ``z>1`` only as a *review flag*, never a
+  downgrade).
+* The brittle 7-threshold binary AND is replaced by a **difficulty-normalized
+  continuous quality score** (:func:`difficulty_weighted_accuracy` + :func:`quality_score`)
+  with a **selective, CI-based** seat/screen/reject decision and a **perturbation audit**
+  (jitter thresholds ±1 SE, report the decision-flip rate — the §8.3 Alzahrani lens on
+  the admission gate). These three live in :mod:`crucible.characterize.profile`; the
+  difficulty-weighting + score combiner that feed them are the pure reductions here.
 
 The six (each tied to the paper that grounds it):
 
@@ -26,9 +42,25 @@ The six (each tied to the paper that grounds it):
    "Rating Roulette", arXiv:2510.27106).
 5. **Calibration (ECE)** — expected calibration error from confidence vs correctness;
    down-weight overconfident judges (quantization worsens calibration — Proskurina et
-   al. 2024, arXiv:2405.00632).
+   al. 2024, arXiv:2405.00632). Per §12, :func:`expected_calibration_error` returns
+   ``None`` (not an error) when no record carries a confidence — "not measured" is a
+   first-class outcome the continuous score handles, since the calibration set may have
+   no logprob/vote-fraction confidence wired yet.
 6. **Bias panel** — position-swap flip-rate, verbosity bias, and a same-vs-different-
    family agreement delta (self/family preference, §1/§3).
+
+Two §12-added reductions feed the continuous gate:
+
+* **Difficulty-weighted accuracy** (:func:`difficulty_weighted_accuracy`) — weights each
+  item by ``metadata["difficulty"]`` when present (else unweighted), the model-free
+  stand-in for IRT θ-normalization on a ~6-respondent panel where classical 2PL MLE is
+  infeasible (ATLAS, Peiyu Li et al. 2025, arXiv:2511.04689; sample-size, Schroeders &
+  Gnambs 2025). Raw accuracy is distorted on easy-only sets — crucible's exact failure.
+* **Continuous quality score** (:func:`quality_score`) — a calibrated 0–1 combiner of
+  difficulty-weighted accuracy + agreement + consistency, minus ECE and bias penalties
+  (§12 Q4). Monotone in every "good" component, so the profile layer can push an
+  accuracy confidence interval through it to get a score CI for the selective decision
+  (Traub 2024, arXiv:2407.01032 — score across the operating curve, not at one cut).
 
 Implementation reuses scipy (Pearson) and statsmodels (Cohen's κ via
 ``inter_rater.cohens_kappa``); it deliberately does **not** edit ``crucible.scoring``
@@ -55,14 +87,17 @@ from crucible.characterize.types import JudgmentRecord
 
 __all__ = [
     "objective_accuracy",
+    "difficulty_weighted_accuracy",
     "agreement",
     "kappa_zscore",
+    "human_like_kappa",
     "alt_test_omega",
     "consistency",
     "expected_calibration_error",
     "position_bias",
     "verbosity_bias",
     "family_pref_delta",
+    "quality_score",
 ]
 
 
@@ -108,6 +143,65 @@ def objective_accuracy(records: list[JudgmentRecord]) -> float:
     _require_records(records, "objective_accuracy")
     hits = sum(1 for r in records if _is_correct(r))
     return hits / len(records)
+
+
+def difficulty_weighted_accuracy(records: list[JudgmentRecord]) -> float:
+    """Difficulty-normalized accuracy — §12 Q4 (the saturating-set fix).
+
+    Raw accuracy is distorted on easy-only sets: the first characterization run had
+    three models score 1.00 on a set that *saturated*, giving the gate no discrimination
+    at the top. §12's fix is to score difficulty-normalized accuracy — IRT θ adjusts for
+    item difficulty (ATLAS, Peiyu Li et al. 2025, arXiv:2511.04689), but with ~6
+    respondents classical 2PL MLE is infeasible (needs ~200–500 — Schroeders & Gnambs
+    2025, doi:10.1177/25152459251314798), so we use the **model-free** stand-in: weight
+    each item by its declared difficulty.
+
+    Each record's difficulty is read from ``metadata["difficulty"]`` (a number, higher =
+    harder). Getting a *hard* item right is worth more than getting an easy one right, so
+    the weighted accuracy is ``Σ w_i·correct_i / Σ w_i`` over items. When **no** record
+    carries a difficulty the function degrades gracefully to plain
+    :func:`objective_accuracy` (unweighted) — "not annotated" is the common path for the
+    trivial-anchor items and must not penalize the judge. A non-positive or non-numeric
+    difficulty is treated as "unweighted for that item" (weight 1.0) rather than raising,
+    so a partially-annotated set still scores.
+
+    Where an item is judged multiple times (test-retest ``run_index`` passes) each record
+    contributes (the repeats just reinforce the per-item weight) — the result stays in
+    ``[0, 1]`` because it is a convex combination of 0/1 correctness indicators.
+
+    Args:
+        records: the judge's records on labeled items (non-empty); difficulty optional
+            in ``metadata["difficulty"]``.
+
+    Returns:
+        Difficulty-weighted accuracy in ``[0.0, 1.0]`` (== :func:`objective_accuracy`
+        when no item carries a usable difficulty).
+
+    Raises:
+        ValueError: if ``records`` is empty.
+    """
+    _require_records(records, "difficulty_weighted_accuracy")
+    num = 0.0
+    den = 0.0
+    any_weighted = False
+    for r in records:
+        raw = r.metadata.get("difficulty")
+        weight = 1.0
+        if raw is not None:
+            try:
+                w = float(raw)
+            except (TypeError, ValueError):
+                w = 0.0
+            if w > 0.0:
+                weight = w
+                any_weighted = True
+        num += weight * (1.0 if _is_correct(r) else 0.0)
+        den += weight
+    if not any_weighted:
+        # No difficulty signal anywhere → plain accuracy (the convex sum collapses to it
+        # with all-equal weights, but compute it directly so the contract is obvious).
+        return objective_accuracy(records)
+    return num / den
 
 
 def _numeric_pairs(records: list[JudgmentRecord]) -> tuple[list[float], list[float]]:
@@ -392,8 +486,8 @@ def consistency(records: list[JudgmentRecord]) -> float:
 
 def expected_calibration_error(
     records: list[JudgmentRecord], *, n_bins: int = 10
-) -> float:
-    """Expected Calibration Error from confidence vs correctness — §11.1 #5.
+) -> float | None:
+    """Expected Calibration Error from confidence vs correctness — §11.1 #5 / §12.
 
     ECE (the standard binned estimator — Naeini et al. 2015 / Guo et al. 2017,
     grounded for judges by Proskurina et al. 2024, arXiv:2405.00632, which shows
@@ -408,19 +502,24 @@ def expected_calibration_error(
     *profile* layer down-weights high-ECE judges rather than rejecting them outright
     (calibration is a soft signal, §11.1).
 
-    Only records carrying a non-``None`` ``confidence`` participate. A confidence
-    outside ``[0, 1]`` is a caller error and raises.
+    **§12 contract change.** When **no** record carries a confidence this returns
+    ``None`` ("calibration not measured") instead of raising — the §12 finding is that
+    the verbalized number is untrustworthy (Xiong et al. 2024, arXiv:2306.13063) and the
+    real signal (verdict-token logprob / panel-vote fraction; Ollama exposes
+    ``logprobs`` since v0.12.11) may not be wired for a given calibration run. A missing
+    calibration signal must not fail a judge, so the gate treats ``None`` as a neutral
+    (no down-weight). An out-of-range confidence is still a caller error and raises.
 
     Args:
         records: the judge's records; those with ``confidence is None`` are ignored.
         n_bins: number of equal-width confidence bins (default 10; must be ≥ 1).
 
     Returns:
-        ECE in ``[0.0, 1.0]``.
+        ECE in ``[0.0, 1.0]``, or ``None`` when no record carries a confidence.
 
     Raises:
-        ValueError: if ``records`` is empty, ``n_bins < 1``, no record carries a
-            confidence, or a confidence is outside ``[0, 1]``.
+        ValueError: if ``records`` is empty, ``n_bins < 1``, or a confidence is outside
+            ``[0, 1]``.
     """
     _require_records(records, "expected_calibration_error")
     if n_bins < 1:
@@ -439,9 +538,9 @@ def expected_calibration_error(
         corr.append(1.0 if _is_correct(r) else 0.0)
 
     if not conf:
-        raise ValueError(
-            "expected_calibration_error needs at least one record with a confidence"
-        )
+        # §12: "calibration not measured" is a first-class outcome, not an error — the
+        # confidence channel (logprob / vote-fraction) may simply not be wired this run.
+        return None
 
     confidence = np.asarray(conf)
     correct = np.asarray(corr)
@@ -599,6 +698,68 @@ def family_pref_delta(records: list[JudgmentRecord]) -> float:
     if not same or not diff:
         return 0.0
     return float(sum(same) / len(same) - sum(diff) / len(diff))
+
+
+def quality_score(
+    *,
+    accuracy: float,
+    agreement_r: float,
+    consistency: float,
+    ece: float | None,
+    max_bias: float,
+    ece_soft_ceiling: float = 0.15,
+    w_accuracy: float = 0.5,
+    w_agreement: float = 0.3,
+    w_consistency: float = 0.2,
+) -> float:
+    """Calibrated 0–1 judge-quality score — §12 Q4 (replaces the brittle 7-threshold AND).
+
+    §12 retires the multi-threshold binary gate in favor of a single
+    **difficulty-normalized, calibrated, continuous** judge-quality score, scored across
+    the operating curve rather than at one cut (Traub 2024, "selective classification",
+    arXiv:2407.01032 — a single fixed threshold can violate monotonicity). This is the
+    pure combiner; the profile layer feeds it ``accuracy`` =
+    :func:`difficulty_weighted_accuracy` (the §12 difficulty normalization) and the other
+    measured components, and pushes an *accuracy confidence interval* through it (holding
+    the deterministic factors fixed) to get a score CI for the selective decision.
+
+    Form — a convex blend of the three "good" components, then multiplicative penalties:
+
+        base    = w_acc·acc + w_agr·max(0, r) + w_cons·consistency        ∈ [0, 1]
+        p_ece   = 1 / (1 + max(0, ece − ece_soft_ceiling))   (1.0 if ece is None)
+        p_bias  = max(0, 1 − max_bias)
+        score   = base · p_ece · p_bias                                   ∈ [0, 1]
+
+    The blend weights sum to 1 so ``base`` stays in ``[0, 1]``; the penalties are in
+    ``(0, 1]``, so the product is bounded in ``[0, 1]`` and is **monotone**: strictly
+    non-decreasing in accuracy / agreement / consistency and non-increasing in ECE and
+    bias. Monotonicity is the property the selective-CI decision relies on (a higher
+    accuracy bound ⇒ a higher score bound). ECE is a *soft* signal (it only bites past
+    the soft ceiling and never zeroes the score), matching §11.1; ``None`` ECE
+    ("not measured", §12) applies no calibration penalty.
+
+    Args:
+        accuracy: difficulty-weighted accuracy in ``[0, 1]`` (§12; pass
+            :func:`difficulty_weighted_accuracy`).
+        agreement_r: Pearson r vs gold/human in ``[-1, 1]`` (negative ⇒ contributes 0).
+        consistency: test-retest stability in ``[0, 1]`` (1 − flip-rate).
+        ece: expected calibration error in ``[0, 1]`` or ``None`` (not measured).
+        max_bias: the largest bias magnitude (position / verbosity / |family-pref|) in
+            ``[0, 1]``.
+        ece_soft_ceiling: ECE below this is "calibrated" and applies no penalty
+            (default 0.15, the §11.1 soft ceiling).
+        w_accuracy, w_agreement, w_consistency: blend weights (should sum to 1.0;
+            defaults 0.5 / 0.3 / 0.2 lead with difficulty-weighted accuracy).
+
+    Returns:
+        The continuous quality score in ``[0.0, 1.0]``.
+    """
+    r_unit = max(0.0, agreement_r)
+    base = w_accuracy * accuracy + w_agreement * r_unit + w_consistency * consistency
+    base = max(0.0, min(1.0, base))
+    p_ece = 1.0 if ece is None else 1.0 / (1.0 + max(0.0, ece - ece_soft_ceiling))
+    p_bias = max(0.0, 1.0 - max_bias)
+    return float(max(0.0, min(1.0, base * p_ece * p_bias)))
 
 
 # Re-export the standard-normal CDF helper used by the profile layer's z-tests so it
