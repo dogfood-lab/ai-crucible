@@ -52,6 +52,7 @@ from crucible.characterize.metrics import (
     position_bias,
     quality_score,
     temperature_scaled_ece,
+    temperature_scaled_ece_cv,
     verbosity_bias,
 )
 from crucible.characterize.profile import (
@@ -1028,6 +1029,51 @@ def test_temperature_scaled_ece_accepts_given_temperature() -> None:
     temp, raw, scaled = temperature_scaled_ece(recs, temperature=1.0)
     assert temp == 1.0
     assert scaled == pytest.approx(raw)  # T=1 → identity → ECE unchanged
+
+
+def test_cv_improves_overconfident_held_out() -> None:
+    """Held-out k-fold: temperature fit WITHOUT the test fold still lowers ECE on the
+    consistently-overconfident set — the out-of-sample number, not the optimistic one."""
+    mean_temp, raw, ece_cv = temperature_scaled_ece_cv(_overconfident_records())
+    assert mean_temp > 1.0
+    assert raw is not None and ece_cv is not None
+    assert ece_cv < raw
+
+
+def test_cv_none_when_no_confidence() -> None:
+    recs = [JudgmentRecord(item_id="n", model_id="m", predicted=1, gold=1, correct=True)]
+    assert temperature_scaled_ece_cv(recs) == (1.0, None, None)
+
+
+def test_cv_falls_back_to_in_sample_for_single_item() -> None:
+    """One item → nothing to hold out → documented fall-back to the in-sample estimate."""
+    recs = [_conf_rec("only", 0.9, k < 3) for k in range(5)]  # 5 reruns, one item id
+    mean_temp, raw, scaled = temperature_scaled_ece_cv(recs)
+    assert raw is not None and scaled is not None  # a real (in-sample) result, not a crash
+
+
+def test_cv_groups_reruns_without_leakage() -> None:
+    """Records with multiple reruns per item run cleanly through grouped CV (every rerun
+    of an item shares a fold) and yield a valid ECE in [0, 1]."""
+    recs: list[JudgmentRecord] = []
+    for i in range(4):
+        for ri in range(3):
+            recs.append(
+                JudgmentRecord(
+                    item_id=f"it{i}", model_id="m",
+                    predicted=1 if i < 3 else 0, gold=1, correct=i < 3,
+                    confidence=0.9, run_index=ri,
+                )
+            )
+    mean_temp, raw, ece_cv = temperature_scaled_ece_cv(recs)
+    assert mean_temp > 0.0
+    assert ece_cv is not None and 0.0 <= ece_cv <= 1.0
+
+
+def test_cv_clamps_folds_to_item_count() -> None:
+    """More folds than items → clamp to leave-one-out; still returns a held-out ECE."""
+    _mean_temp, raw, ece_cv = temperature_scaled_ece_cv(_overconfident_records(), folds=100)
+    assert raw is not None and ece_cv is not None
 
 
 # --------------------------------------------------------------------------- #

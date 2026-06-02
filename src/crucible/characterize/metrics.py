@@ -688,6 +688,76 @@ def temperature_scaled_ece(
     return (temp, raw, scaled)
 
 
+def temperature_scaled_ece_cv(
+    records: list[JudgmentRecord],
+    *,
+    folds: int = 5,
+    n_bins: int = 10,
+) -> tuple[float, float | None, float | None]:
+    """Held-out (k-fold) temperature scaling — the honest, out-of-sample ECE (§12 Q3).
+
+    :func:`temperature_scaled_ece` fits ``T`` and measures ECE on the **same** records —
+    optimistic. This estimates the ECE temperature scaling actually buys on *unseen* data:
+    split the calibration set into ``folds`` folds, fit ``T`` on the train folds, apply it
+    to the held-out fold, and pool the held-out (scaled) records for one ECE over the whole
+    set — each record scaled by a ``T`` fit **without** it.
+
+    **No rerun leakage.** Folds are grouped by ``item_id``: every test-retest rerun of an
+    item lands in the *same* fold, so a temperature is never fit on one rerun of an item
+    and tested on another (which would leak). Folds are assigned round-robin over sorted
+    item ids (deterministic — PIN_PER_STEP).
+
+    Degenerate folds are handled the honest way: a train fold with only one correctness
+    class yields ``T = 1.0`` (identity — "no calibration learned here"), so those held-out
+    records are simply unscaled rather than scaled by an overfit temperature.
+
+    Args:
+        records: the judge's records (non-empty).
+        folds: target fold count (default 5); clamped to ``[2, n_items]``. With one item
+            cross-validation is impossible and this falls back to the in-sample
+            :func:`temperature_scaled_ece` (documented, not silent).
+        n_bins: ECE bin count.
+
+    Returns:
+        ``(mean_temperature, ece_raw, ece_cv)`` — ``mean_temperature`` is the mean of the
+        per-fold fitted ``T``; ``ece_raw`` is the unscaled ECE over all records; ``ece_cv``
+        is the pooled held-out scaled ECE. ``(1.0, None, None)`` when confidence is
+        unmeasured.
+    """
+    raw = expected_calibration_error(records, n_bins=n_bins)
+    if raw is None:
+        return (1.0, None, None)
+
+    by_item: dict[str, list[JudgmentRecord]] = defaultdict(list)
+    for r in records:
+        if r.confidence is not None:
+            by_item[r.item_id].append(r)
+    items = sorted(by_item)
+    if len(items) < 2:
+        # cannot hold anything out with a single item — fall back, honestly.
+        return temperature_scaled_ece(records, n_bins=n_bins)
+
+    k = max(2, min(folds, len(items)))
+    fold_of = {item: i % k for i, item in enumerate(items)}
+
+    temps: list[float] = []
+    pooled_scaled: list[JudgmentRecord] = []
+    for f in range(k):
+        train = [r for it in items if fold_of[it] != f for r in by_item[it]]
+        test = [r for it in items if fold_of[it] == f for r in by_item[it]]
+        if not test:
+            continue
+        temp = fit_temperature(train) if train else 1.0
+        temps.append(temp)
+        pooled_scaled.extend(
+            replace(r, confidence=apply_temperature(r.confidence, temp)) for r in test
+        )
+
+    ece_cv = expected_calibration_error(pooled_scaled, n_bins=n_bins)
+    mean_temp = float(np.mean(temps)) if temps else 1.0
+    return (mean_temp, raw, ece_cv)
+
+
 def position_bias(records: list[JudgmentRecord]) -> float:
     """Position-swap flip-rate — §11.1 #6 (bias panel).
 

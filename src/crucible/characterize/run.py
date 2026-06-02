@@ -45,7 +45,7 @@ from crucible.calibration import irt
 from crucible.calibration.loader import load_items
 from crucible.calibration.types import CalibrationCategory, CalibrationItem
 from crucible.characterize import aggregate
-from crucible.characterize.metrics import temperature_scaled_ece
+from crucible.characterize.metrics import temperature_scaled_ece_cv
 from crucible.characterize.panel_store import save_panel
 from crucible.characterize.profile import build_profile, perturbation_audit
 from crucible.characterize.types import JudgeProfile, JudgmentRecord, RoleSlot
@@ -330,26 +330,26 @@ def perturbation_report(records: dict[str, list[JudgmentRecord]]) -> dict[str, A
 def calibration_report(records: dict[str, list[JudgmentRecord]]) -> dict[str, Any]:
     """Per-model post-hoc temperature scaling — §12 Q3 (Guo et al. 2017).
 
-    Reports each judge's fitted temperature + ECE before vs after rescaling the
-    verdict-token-logprob confidence. The fit is IN-SAMPLE (a held-out split is the
-    honest next step — surfaced in the note so a reader never mistakes the scaled ECE
-    for an out-of-sample number).
+    Reports each judge's mean fitted temperature + ECE before vs after, measured
+    **held-out** (k-fold grouped by item, so test-retest reruns never leak across the
+    fit/measure split). ``ece_cv`` is therefore the out-of-sample ECE temperature scaling
+    actually buys — not the optimistic in-sample number.
     """
     out: dict[str, Any] = {}
     for model_id, recs in records.items():
         try:
-            temp, raw, scaled = temperature_scaled_ece(recs)
+            temp, raw, cv = temperature_scaled_ece_cv(recs)
         except Exception as exc:  # noqa: BLE001
             out[model_id] = {"error": repr(exc)}
             continue
         out[model_id] = {
-            "temperature": round(temp, 4),
+            "mean_temperature": round(temp, 4),
             "ece_raw": round(raw, 4) if raw is not None else None,
-            "ece_scaled": round(scaled, 4) if scaled is not None else None,
+            "ece_cv": round(cv, 4) if cv is not None else None,
         }
     return {
         "by_model": out,
-        "note": "temperature scaling (Guo 2017) fit IN-SAMPLE (§12 Q3); held-out split is next",
+        "note": "temperature scaling (Guo 2017) measured HELD-OUT: k-fold grouped by item",
     }
 
 
