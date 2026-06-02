@@ -45,6 +45,7 @@ from crucible.calibration import irt
 from crucible.calibration.loader import load_items
 from crucible.calibration.types import CalibrationCategory, CalibrationItem
 from crucible.characterize import aggregate
+from crucible.characterize.panel_store import save_panel
 from crucible.characterize.profile import build_profile, perturbation_audit
 from crucible.characterize.types import JudgeProfile, JudgmentRecord, RoleSlot
 from crucible.models.ollama_adapter import OllamaModel
@@ -346,6 +347,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--k", type=int, default=3, help="reruns per item (test-retest)")
     ap.add_argument("--models", nargs="*", default=None, help="model_id@family specs")
     ap.add_argument("--out", type=Path, default=Path("characterization-report.json"))
+    ap.add_argument(
+        "--write-panel",
+        type=Path,
+        default=None,
+        help="also write the composed seated panel to this path (the committed artifact)",
+    )
     args = ap.parse_args(argv)
 
     items = load_items(args.items) if args.items else _load_admission_items()
@@ -374,6 +381,12 @@ def main(argv: list[str] | None = None) -> int:
         panel = [(s["model_id"], round(s["reliability_weight"], 3)) for s in comp["seats"]]
         verdict = "escalate (sub-quorum)" if comp["escalate"] else "quorum met"
         print(f"composed panel ({verdict}): {panel}")
+    if args.write_panel is not None:
+        try:
+            save_panel(aggregate.compose_panel(profiles, records), args.write_panel)
+            print(f"panel artifact -> {args.write_panel}")
+        except Exception as exc:  # noqa: BLE001 — artifact write must not fail the run
+            print(f"panel artifact NOT written: {exc!r}")
     print(f"report -> {args.out}")
     return 0
 
