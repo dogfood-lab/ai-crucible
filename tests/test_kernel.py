@@ -33,10 +33,18 @@ from pathlib import Path
 import anyio
 import pytest
 
+from crucible.characterize.aggregate import compose_panel
+from crucible.characterize.types import (
+    JudgeProfile,
+    JudgmentRecord,
+    RoleSlot,
+    SeatDecision,
+)
 from crucible.engagement import SealedBoundaryViolation, build_chrome
 from crucible.kernel import run_attempt, run_pass_hat_k
 from crucible.observability import PuzzleHistory
 from crucible.puzzle import LoadedPuzzle, load_puzzle
+from crucible.scoring.judge_panel import JudgePanel
 from crucible.scoring.oracle import OracleOutcome
 from crucible.types import (
     AttemptState,
@@ -698,6 +706,84 @@ def test_no_judges_means_no_panel_score(sample_dir: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Novelty is PANEL-adjudicated, not oracle_runner-trusted (H2, §8.3/§8.7)
 # --------------------------------------------------------------------------- #
+
+
+def test_e2e_composed_weighted_panel_drives_kernel_gate(sample_dir: Path) -> None:
+    """End-to-end arc (§11.4): characterization profiles → compose_panel →
+    JudgePanel.from_seated → run_attempt(panel=...). The seated reliability weights
+    decide the panel verdict, and the cross-family panel — not the oracle_runner —
+    adjudicates the claimed novelty bonus. This locks the whole vertical slice together:
+    characterize → compose → score."""
+    loaded = load_puzzle(sample_dir)
+
+    def _prof(model_id: str, weight: float) -> JudgeProfile:
+        return JudgeProfile(
+            model_id=model_id,
+            role=RoleSlot.JUDGE,
+            n_items=4,
+            reliability_weight=weight,
+            seat_decision=SeatDecision.SEAT,
+            metadata={},
+        )
+
+    def _perfect(model_id: str) -> list[JudgmentRecord]:
+        # perfect → zero-variance error vector → ρ=0 with every peer → all three seat
+        return [
+            JudgmentRecord(
+                item_id=f"i{j}", model_id=model_id, predicted=1, gold=1,
+                correct=True, family=model_id,
+            )
+            for j in range(4)
+        ]
+
+    profiles = {
+        "qwen": _prof("qwen", 0.9),
+        "mistral": _prof("mistral", 0.1),
+        "cohere": _prof("cohere", 0.1),
+    }
+    records = {m: _perfect(m) for m in profiles}
+
+    seated = compose_panel(profiles, records)
+    assert seated.meets_quorum and not seated.escalate
+    # qwen first (w=0.9); the two w=0.1 seats tie → ordered by model_id (cohere < mistral)
+    assert [s.model_id for s in seated.seats] == ["qwen", "cohere", "mistral"]
+
+    # The reliable qwen rules the attempt ILLEGITIMATE but all three VALIDATE novelty.
+    legitimacy = {"qwen": False, "mistral": True, "cohere": True}
+
+    def judge_for(model_id: str):
+        async def _j(_a: AttemptState) -> Score:
+            return Score(value=legitimacy[model_id], metadata={"novelty_validated": True})
+
+        return _j
+
+    panel = JudgePanel.from_seated(seated, judge_for, generator_family="claude")
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "claude-opus-4-8",
+            generate=fake_generate(_CORRECT_ANSWER),
+            # adversarial: oracle_runner says novelty NOT validated — must be ignored.
+            oracle_runner=oracle_runner_for(
+                novelty_claimed_outcome(loaded.meta, runner_validated=False)
+            ),
+            panel=panel,
+        )
+    )
+
+    panel_score = attempt.scores["panel"]
+    # the composed, reliability-weighted panel ran through the kernel:
+    assert panel_score.metadata["reducer"] == "weighted"
+    assert panel_score.value is False  # 0.9 (False) outweighs 0.1 + 0.1 (True)
+    assert panel_score.metadata["margin"] == pytest.approx(0.9 / 1.1)
+    # the panel (not the oracle_runner's False) governed the novelty bonus → reached the gate:
+    assert panel_score.metadata["novelty_validated"] is True
+    oracle = attempt.scores["oracle"]
+    assert oracle.metadata["gate_passed"] is True
+    assert oracle.metadata["components"]["novelty"] == pytest.approx(
+        loaded.meta.rewards.novelty_bonus_max
+    )
 
 
 def test_panel_validated_novelty_reaches_the_gate_value(sample_dir: Path) -> None:

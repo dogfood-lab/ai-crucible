@@ -209,6 +209,7 @@ async def run_attempt(
     arm: FramingArm = FramingArm.SELF_REFERENTIAL,
     sandbox: SandboxEnvironment | None = None,
     judges: list[JudgeFn] | None = None,
+    panel: JudgePanel | None = None,
     enable_critic: bool = False,
     chrome: Chrome | None = None,
     panel_reducer: str = "majority",
@@ -250,7 +251,13 @@ async def run_attempt(
         judges: cross-family judges for the panel; ``None`` skips the panel. When a
             novelty bonus is claimed, the panel is the validation authority (§8.7) —
             each judge may carry a ``novelty_validated`` vote in its score metadata,
-            aggregated into the panel verdict that drives the oracle gate.
+            aggregated into the panel verdict that drives the oracle gate. Ignored when
+            ``panel`` is supplied.
+        panel: a pre-built :class:`JudgePanel` to use as-is (e.g.
+            :meth:`JudgePanel.from_seated` — the composed, reliability-weighted,
+            cross-family panel from characterization, §11.4). Takes precedence over
+            ``judges``/``panel_reducer``/``generator_family`` (the supplied panel carries
+            its own reducer + exclusion). ``None`` (default) builds a panel from ``judges``.
         enable_critic: opt the default-OFF Critic in for this attempt (§10.3).
         chrome: Tier-3 chrome held on the attempt for the human UI; guarded out of
             the scored context.
@@ -349,9 +356,15 @@ async def run_attempt(
     outcome = await oracle_runner(attempt, meta)
 
     panel_score: Score | None = None
-    if judges:
-        panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
-        panel_score = await panel.score(attempt)
+    # A pre-composed panel (e.g. JudgePanel.from_seated — characterization → scoring,
+    # §11.4) is used as-is, carrying its OWN reducer + generator_family; otherwise build
+    # one from the injected judges. ``panel`` takes precedence over ``judges`` when both
+    # are given.
+    active_panel = panel
+    if active_panel is None and judges:
+        active_panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
+    if active_panel is not None:
+        panel_score = await active_panel.score(attempt)
 
     # The oracle_runner is NOT trusted for novelty validation. With a panel, the
     # panel's aggregated verdict governs; without a panel, an unvalidatable claim is
