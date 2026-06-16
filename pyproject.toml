@@ -43,6 +43,19 @@ ai-crucible = "ai_crucible.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_crucible"]
 
+[tool.uv]
+# Security floors on TRANSITIVE dependencies (Ship Gate D / pip-audit). We don't
+# import these directly — aiohttp arrives via s3fs, starlette via fastapi <-
+# inspect-ai — so we constrain the resolver rather than declare them as runtime
+# deps. Bumped to clear advisory-database drift (CVEs published after the last
+# green run; no first-party code changed):
+#   aiohttp   >=3.14.1 — CVE-2026-34993, -47265, -54273..54280, -50269
+#   starlette >=1.3.1  — CVE-2026-54282 (fix 1.3.0), CVE-2026-54283 (fix 1.3.1)
+constraint-dependencies = [
+  "aiohttp>=3.14.1",
+  "starlette>=1.3.1",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
