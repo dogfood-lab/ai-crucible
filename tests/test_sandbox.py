@@ -547,3 +547,22 @@ def test_copy_workdir_out_refuses_existing_dest(tmp_path: Path) -> None:
     dest.mkdir()  # already exists
     with pytest.raises(FileExistsError):
         copy_workdir_out(src, dest)
+
+
+def test_write_file_preserves_lf_no_crlf_translation() -> None:
+    """write_file must land bytes verbatim — no platform newline translation.
+
+    On Windows the default ``Path.write_text`` rewrites ``\n`` -> ``\r\n``, which
+    corrupts a staged bash script (``set -euo pipefail\r`` -> bash rejects it) and
+    any LF-sensitive file. The sandbox is a faithful write channel; LF stays LF on
+    every OS. (epic-1 staging finding; sibling of the path.sep blind-spot.)
+    """
+    box = LocalSandbox()  # async context manager — construct + cleanup directly here
+    try:
+        content = "set -euo pipefail\nmkdir -p x\necho done\n"
+        asyncio.run(box.write_file("setup.sh", content))
+        raw = (box.root / "setup.sh").read_bytes()
+    finally:
+        box.cleanup()
+    assert b"\r\n" not in raw, "write_file must not translate LF to CRLF"
+    assert raw == content.encode("utf-8")
