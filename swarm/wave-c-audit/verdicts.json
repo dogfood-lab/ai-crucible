@@ -1,0 +1,312 @@
+{
+ "panel": [
+  "deepseek-v4-pro:cloud",
+  "qwen3-coder:480b-cloud",
+  "glm-5:cloud",
+  "kimi-k2.6:cloud",
+  "gpt-oss:120b-cloud"
+ ],
+ "n_findings": 11,
+ "verdicts": [
+  {
+   "id": "cli-operator-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The defect is real: main() lacks a top-level try/except, and the lazy import at line 65 can raise ModuleNotFoundError (as shown in the probe). It is triggerable by missing dependencies or bad input paths. Severity is correctly MEDIUM because it's a UX/legibility issue, not a measurement-integrity breach; the structured error hint is still present at the bottom.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "cli-operator-002",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The exit-code contract is indeed not documented in --help or discoverable by operators, forcing them to read source code to understand the meaning of return codes. This creates a realistic risk of misinterpreting exit codes in CI/CD pipelines, potentially leading to silent failures or incorrect automation decisions.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "characterize-result-legibility-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The caveat is indeed omitted from stdout summary, but the authoritative report contains it; this is a legibility/observability issue, not a measurement integrity breach, so severity is MEDIUM.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms that the caveat is only written to the JSON report and not printed to stdout, creating a realistic path for operators to misinterpret provisional results as authoritative. This directly impacts measurement integrity by misleading humans about the validity of the panel composition and κ baseline, which are central to the instrument's credibility.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The caveat is structurally real: _ALT_TEST_CAVEAT and kappa_baseline.provisional are written to the report dict but the stdout summary at lines 690-696 omits them entirely. An operator reading only the terminal sees 'quorum met' with no indication that seats are provisional or that ω is circular, which genuinely mis-reports measurement validity for a sealed-boundary instrument.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "characterize-result-legibility-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms the end-of-run stdout summary (lines 690-704) never references `failed` or `degraded`, while the JSON report at line 613 does; after a multi-hour run an operator realistically sees only the final summary and misses the earlier per-model ERROR line. MEDIUM is correctly calibrated because no measurement boundary is breached and the authoritative JSON preserves the truth, yet the human-facing omission creates a material risk of misinterpreting a thinned panel as full-strength.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "characterize-result-legibility-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code never prints before the long `collect_records` call, so runs can be silent for ~25 min, which is reproducible with default settings. The impact is purely UI/observability, causing possible user‑abort but no correctness or security breach.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "characterize-result-legibility-004",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code indeed lacks any pre-run summary print, leaving the operator uninformed about the planned job. This is a real observability gap, not a misread, and the MEDIUM severity is appropriate for a missing user-facing summary.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "characterize-result-legibility-005",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that decision rationale in `profile.notes` is not displayed in the terminal output, forcing operators to inspect JSON for context. This is a legitimate usability issue but does not impact measurement integrity or security.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "error-hint-sweep-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The defect is real: load_items/load_human_labels are called without try/except, so structured exceptions propagate as raw tracebacks. However, the consequence is a confusing error display, not a measurement integrity breach; severity is inflated from HIGH to MEDIUM as it's a UX/observability gap, not a critical sealed-boundary or grading failure.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that operator-facing structured errors are buried in raw Python tracebacks due to missing exception handling in the CLI path, which degrades UX and confuses exit codes. However, the worst realistic consequence is limited to poor user experience and ambiguous exit codes, not a fundamental measurement or security failure, so severity should be deflated from HIGH to MEDIUM.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The defect exists—loader exceptions propagate as raw tracebacks because run.py:594-596 calls load_items/load_human_labels outside any try/except, and cli.py dispatches without catching. However, this is observability/UX polish, not measurement integrity: the error IS surfaced (just ugly), no oracle leaks, no verdict flip, no security boundary breach. Per rubric, 'could be more defensive / observability' is MEDIUM-or-below.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "MEDIUM",
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "error-hint-sweep-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The stdout tail at lines 690-703 prints the seated panel and report path but omits the `_ALT_TEST_CAVEAT` and `degraded` flag that are written to the JSON at lines 613-615, so an operator reading only the terminal after a long run can reasonably treat a provisional bootstrap as authoritative. Because the canonical JSON record remains accurate and the user is explicitly directed to it, the impact is observational rather than a corrupted measurement, so MEDIUM is the correct ceiling.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "error-hint-sweep-003",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code raises SealedBoundaryViolation and ChromeAccessError without using the structured `_fail` helper, so the inconsistency exists and can be triggered by leaking chrome data into scored messages; the impact is limited to developer ergonomics, matching the claimed LOW severity.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "error-hint-sweep-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The --help output indeed lacks exit code documentation, a real omission. It is triggerable by any operator wiring the tool into automation without reading source. Severity is correctly LOW as it's a documentation gap, not a measurement integrity breach.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  }
+ ]
+}
