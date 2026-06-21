@@ -15,6 +15,15 @@ import contextlib
 import re
 import sys
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Type-only imports — kept out of the runtime path so ``--help``/``--version`` stay
+    # instant and free of the heavy kernel/model stack (the lazy imports inside the
+    # ``run`` handler do the real loading, under main()'s structured-error guard).
+    from ai_crucible.cycle import DiagnosticModel
+    from ai_crucible.scoring.judge_panel import JudgeFn, JudgePanel
 
 # A structured Ship-Gate-B error string: ``[CODE] message (hint: ...)`` — the shape every
 # loader/adapter in the repo emits via its ``_fail(code, message, hint)`` helper. We match on
@@ -69,6 +78,16 @@ commands:
   characterize   run the judge-admission characterization on the local model panel
                  (needs Ollama + the local panel; forwards all flags — see
                  `ai-crucible characterize --help`)
+  run            run one diagnostic cycle: a Solver attempts a puzzle in the sandbox,
+                 graded out-of-band against the sealed oracle, emitting the pass^k /
+                 Wilson rollup. usage:
+                   ai-crucible run <puzzle-dir> --model <id>[@family]
+                       [--k N] [--arm neutral|self_referential|social_standings]
+                       [--panel <path>]
+                 The model adapter is chosen by the optional @family tag: no tag or
+                 @claude → Claude (Anthropic API; needs ANTHROPIC_API_KEY); any other
+                 @family → an Ollama local model of that family (needs Ollama).
+                 Human rollup chrome → STDERR; machine JSON summary → STDOUT.
 
 options:
   --debug, -v    on error, print the full Python traceback (developer mode) instead of the
@@ -77,11 +96,13 @@ options:
   -h, --help     show this message and exit
 
 exit codes:
-  0  success (also: --help, --version)
-  2  usage error — unknown command
+  0  success (also: --help, --version; `run` completed a cycle and emitted a rollup)
+  2  usage error — unknown command, or `run` invoked without a puzzle-dir / --model
   1  (characterize) ran but collected zero judgments — every model failed/unreachable;
      stderr carries a structured [CHARACTERIZE_NO_JUDGMENTS] {{code,message,hint}} JSON. CI
      gates should treat 1 (degraded/empty result) distinctly from 2 (bad invocation).
+  1  (run) the puzzle failed to load or stage (a structured [CODE] msg (hint:) error on
+     stderr) — distinct from 2 (a bad invocation that never reached the cycle).
 """
 
 
@@ -97,8 +118,143 @@ def _dispatch(command: str, rest: list[str]) -> int:
 
         return characterize_main(rest)
 
+    if command == "run":
+        return _run_diagnostic_command(rest)
+
     sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
+
+
+def _build_model(model_spec: str) -> DiagnosticModel:
+    """Construct a model adapter from a ``<id>[@family]`` spec (the ``--model`` value).
+
+    The optional ``@family`` tag (split on the LAST ``@``, since a model id may itself
+    contain ``@``-free ``:`` tags like ``mistral-small:24b``) chooses the adapter and
+    feeds the panel's same-family exclusion (§10.2):
+
+    * no ``@family`` tag, or ``@claude`` → :class:`~ai_crucible.models.claude_adapter.ClaudeModel`
+      (the default Designer/Solver, Anthropic API — reads ``ANTHROPIC_API_KEY`` at call time);
+    * any other ``@family`` → :class:`~ai_crucible.models.ollama_adapter.OllamaModel` of that
+      family (a local model served by Ollama).
+
+    Kept a module-level seam (not inlined) so the ``run`` tests inject a CANNED model via
+    ``monkeypatch.setattr(cli, "_build_model", ...)`` and never construct a real adapter or
+    hit a network/API. Imports the adapters lazily so ``--help``/``--version`` stay free of
+    the model stack and a packaging fault is rendered as a structured error by ``main()``.
+    """
+    if "@" in model_spec:
+        model_id, _, family = model_spec.rpartition("@")
+    else:
+        model_id, family = model_spec, ""
+
+    fam = family.strip().lower()
+    if fam and fam != "claude":
+        from ai_crucible.models.ollama_adapter import OllamaModel
+
+        return OllamaModel(model_id=model_id, family=fam)
+
+    from ai_crucible.models.claude_adapter import ClaudeModel
+
+    return ClaudeModel(model_id)
+
+
+def _run_diagnostic_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible run <puzzle-dir> --model <id>[@family] [--k N] [--arm ...]
+    [--panel <path>]``.
+
+    Parses the args, builds the model adapter (:func:`_build_model`), runs one
+    :func:`ai_crucible.cycle.run_diagnostic` cycle via ``asyncio.run``, writes the human
+    rollup chrome to STDERR and the machine JSON summary to STDOUT, and returns 0 on a
+    completed run. A bad invocation (missing puzzle-dir / ``--model``, unknown ``--arm``)
+    returns 2 with a usage message; a load/stage failure raises a structured
+    ``[CODE] msg (hint:)`` error that ``main()``'s top-level handler renders as one line
+    (exit 1). Heavy imports (the kernel/cycle stack) are lazy so they live inside ``main``'s
+    guard and a packaging fault renders cleanly.
+    """
+    import argparse
+    import asyncio
+
+    from ai_crucible.types import FramingArm
+
+    parser = argparse.ArgumentParser(
+        prog="ai-crucible run",
+        description="Run one diagnostic cycle against a puzzle and emit the pass^k rollup.",
+        add_help=True,
+    )
+    parser.add_argument("puzzle_dir", help="the puzzle directory (the one containing meta.json)")
+    parser.add_argument(
+        "--model",
+        required=True,
+        metavar="<id>[@family]",
+        help="model spec; @family chooses the adapter (none/@claude → Claude, else Ollama)",
+    )
+    parser.add_argument("--k", type=int, default=1, help="sibling attempts for pass^k (>=1)")
+    parser.add_argument(
+        "--arm",
+        choices=[a.value for a in FramingArm],
+        default=FramingArm.SELF_REFERENTIAL.value,
+        help="framing arm for the scored context (default: self_referential)",
+    )
+    parser.add_argument(
+        "--panel",
+        type=Path,
+        default=None,
+        help="optional composed seated-panel artifact (panel.json) for cross-family novelty",
+    )
+    # argparse exits(2) on a parse error and prints usage to stderr — exactly the
+    # bad-invocation contract (exit 2, distinct from a load/stage failure's exit 1). It
+    # signals that exit by RAISING SystemExit; main()'s top-level handler only catches
+    # Exception (not the BaseException SystemExit), so we translate it to a RETURN code here
+    # — keeping `run` a plain `main(...) -> int` like every other subcommand (and -h → 0).
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if args.k < 1:
+        sys.stderr.write("ai-crucible run: --k must be >= 1\n")
+        return 2
+
+    # Lazy: keep the heavy kernel/cycle stack out of the --help/--version path.
+    from ai_crucible.cycle import render_rollup, rollup_json, run_diagnostic
+
+    panel = _load_panel(args.panel) if args.panel is not None else None
+    model = _build_model(args.model)
+    arm = FramingArm(args.arm)
+
+    history = asyncio.run(
+        run_diagnostic(Path(args.puzzle_dir), model, args.k, arm=arm, panel=panel)
+    )
+
+    # Stage-C honesty: human chrome → STDERR, machine JSON summary → STDOUT.
+    sys.stderr.write(render_rollup(history, args.k) + "\n")
+    sys.stdout.write(rollup_json(history, args.k) + "\n")
+    return 0
+
+
+def _load_panel(path: Path) -> JudgePanel:
+    """Load a composed seated-panel artifact into a :class:`JudgePanel` for ``run --panel``.
+
+    Reads the committed panel artifact (:func:`ai_crucible.characterize.panel_store.load_panel`)
+    and seats it via :meth:`JudgePanel.from_seated`, instantiating each seated judge as an
+    Ollama judge of its recorded family (the local cross-family panel, §11.4). A missing /
+    malformed artifact raises the panel store's structured ``[CODE] msg (hint:)`` error,
+    rendered as one line by ``main()`` (exit 1). Lazy imports keep the model stack off the
+    no-panel path.
+    """
+    from ai_crucible.characterize.panel_store import load_panel
+    from ai_crucible.models.ollama_adapter import OllamaModel
+    from ai_crucible.scoring.judge_panel import JudgePanel
+
+    seated = load_panel(path)
+
+    def judge_for(model_id: str) -> JudgeFn:
+        # The seat carries the family; instantiate a local Ollama judge for it. The
+        # family is re-bound by from_seated from the seat record, so a placeholder here
+        # is fine — the panel reads the seat's family for exclusion.
+        return OllamaModel(model_id=model_id, family="").as_judge()
+
+    return JudgePanel.from_seated(seated, judge_for)
 
 
 def main(argv: list[str] | None = None) -> int:
