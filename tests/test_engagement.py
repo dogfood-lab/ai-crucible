@@ -308,6 +308,30 @@ def test_assert_no_chrome_leak_scans_arbitrary_string_fields() -> None:
         assert_no_chrome_leak(leaked, chrome)
 
 
+def test_sealed_boundary_violation_carries_code_and_hint() -> None:
+    """PROVE RED (error-hint-sweep-003): the raised message must follow the repo's
+    structured-error shape — a stable ``[SEALED_BOUNDARY_LEAK]`` code prefix and an
+    explicit ``(hint: ...)`` telling the operator/designer what to DO (keep chrome
+    out of scored context) — matching PuzzleLoadError / ModelMismatchError. The
+    precise leak naming (token, index, role) must be preserved alongside it."""
+    chrome = build_chrome(rank=7, cohort_size=12)
+    leaked = [
+        {"role": "system", "content": "You are completing a task."},
+        {"role": "user", "content": "Find the bug. You are currently ranked 7 of 12."},
+    ]
+    with pytest.raises(SealedBoundaryViolation) as exc:
+        assert_no_chrome_leak(leaked, chrome)
+    msg = str(exc.value)
+    assert msg.startswith("[SEALED_BOUNDARY_LEAK]"), msg
+    assert "(hint:" in msg, msg
+    # The actionable remediation: keep chrome out of the scored context.
+    assert "chrome" in msg.lower()
+    # The precise leak naming is preserved (token, message index, role).
+    assert "'7'" in msg
+    assert "message[1]" in msg
+    assert "user" in msg
+
+
 def test_assert_no_chrome_leak_clean_critique_field_passes() -> None:
     """A critique-field message with NO chrome token must still pass — the broader
     value-walk must not introduce false positives on the new field."""

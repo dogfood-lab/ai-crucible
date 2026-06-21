@@ -54,7 +54,12 @@ from ai_crucible.characterize.human_labels import (
 from ai_crucible.characterize.metrics import temperature_scaled_ece_cv
 from ai_crucible.characterize.panel_store import save_panel
 from ai_crucible.characterize.profile import build_profile, perturbation_audit
-from ai_crucible.characterize.types import JudgeProfile, JudgmentRecord, RoleSlot
+from ai_crucible.characterize.types import (
+    JudgeProfile,
+    JudgmentRecord,
+    RoleSlot,
+    SeatDecision,
+)
 from ai_crucible.models.ollama_adapter import OllamaModel
 
 _VERDICT_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
@@ -234,6 +239,24 @@ async def collect_records(
     return records, stats
 
 
+def _decision_why(profile: JudgeProfile) -> str | None:
+    """Pull the contrastive WHY for a profile's seat/screen/reject — the deciding reason.
+
+    characterize-result-legibility-005: ``build_profile`` records a human-legible
+    ``DECISION: REJECT — <reason>`` / ``DECISION: SCREEN — <why>`` note (profile.py) that
+    names the gate that moved the decision. The terminal line should carry that WHY for any
+    non-SEAT decision so a REJECT driven by a format break is distinguishable on screen from
+    one driven by a genuinely-weak judge — without the operator opening the JSON. Returns the
+    reason text after ``DECISION: <WORD> — `` (em-dash), or ``None`` if no such note exists.
+    """
+    for note in profile.notes:
+        if note.startswith("DECISION:"):
+            # "DECISION: REJECT — κ<floor ..." → "κ<floor ..." (split on the em-dash once)
+            _head, _sep, tail = note.partition(" — ")
+            return tail.strip() if tail else note[len("DECISION:"):].strip()
+    return None
+
+
 def _evict(model_id: str) -> None:
     """Free VRAM after a model's run (keep_alive=0 unloads it)."""
     try:
@@ -304,8 +327,18 @@ async def run_panel(
     quant_by_id: dict[str, str | None] = {}
     stats_by_id: dict[str, dict[str, Any]] = {}
     failed: list[dict[str, Any]] = []
-    for model_id, family, quant in panel:
+    n_panel = len(panel)
+    for idx, (model_id, family, quant) in enumerate(panel, start=1):
         quant_by_id[model_id] = quant
+        # characterize-result-legibility-003: emit per-model progress on stderr BEFORE the
+        # pass so a multi-hour run shows liveness instead of a ~25-min black hole per model.
+        # stderr (not stdout) so a consumer parsing the stdout summary lines stays clean.
+        print(
+            f"[{idx}/{n_panel}] loading + judging {model_id} "
+            f"({len(items)} item(s) x k={k}) ...",
+            file=sys.stderr,
+            flush=True,
+        )
         model = OllamaModel(model_id=model_id, family=family, quant=quant)
         t0 = time.monotonic()
         try:
@@ -412,6 +445,21 @@ async def run_panel(
             f"[{model_id}] {profile.seat_decision.value}{flag}  acc={profile.objective_accuracy}  "
             f"q={q}  ece={profile.ece}  omega={profile.alt_test_omega}"
         )
+        # characterize-result-legibility-005: for a non-SEAT decision, echo the contrastive
+        # WHY (the deciding gate from build_profile's DECISION note) to stderr so the reason is
+        # legible on screen — a format-break REJECT reads differently from a weak-judge REJECT.
+        if profile.seat_decision is not SeatDecision.SEAT:
+            why = _decision_why(profile)
+            if why:
+                print(
+                    f"[{model_id}]   └─ {profile.seat_decision.value.upper()}: {why}",
+                    file=sys.stderr,
+                )
+        # surface the [warning]/[degraded] interpretation notes inline too (not only the raw
+        # unparsed=/dropped_items= counts), so the operator sees the actionable reading.
+        for note in profile.notes:
+            if note.startswith(("[warning]", "[degraded]")):
+                print(f"[{model_id}]   {note}", file=sys.stderr)
     return profiles, all_records, failed
 
 
@@ -595,6 +643,19 @@ def main(argv: list[str] | None = None) -> int:
     panel = _parse_models(args.models) if args.models else DEFAULT_PANEL
     human_labels = load_human_labels(args.human_labels, items) if args.human_labels else None
 
+    item_set_name = args.items.name if args.items else "admission_pairs.json"
+    reference = "human" if human_labels else "model-jury-bootstrap (PROVISIONAL)"
+    # characterize-result-legibility-004: announce the plan on stderr BEFORE the (long) run so
+    # the operator can confirm it started + abort a wrong/unintended job before sinking the
+    # time. Emitted on stderr to keep the stdout summary stream clean for any consumer.
+    print(
+        f"characterizing {len(panel)} model(s) over {len(items)} item(s), k={args.k}, "
+        f"item_set={item_set_name}, reference={reference}; "
+        f"this is a long run (minutes per model). report -> {args.out}",
+        file=sys.stderr,
+        flush=True,
+    )
+
     profiles, records, failed = asyncio.run(
         run_panel(panel, items, k=args.k, human_labels=human_labels)
     )
@@ -689,6 +750,19 @@ def main(argv: list[str] | None = None) -> int:
 
     seated = [m for m, p in profiles.items() if p.seat_decision.value == "seat"]
     print(f"\nseated: {seated}")
+    # characterize-result-legibility-005: the final summary carries the contrastive WHY for
+    # every NON-SEAT decision (the deciding gate from build_profile's DECISION note) so a
+    # REJECT driven by a format break reads differently on screen from a weak-judge REJECT —
+    # the operator does not have to open the JSON to learn why a model was not seated. stderr
+    # (the JSON report's profiles[*].notes carry the same text machine-readably).
+    for model_id, profile in profiles.items():
+        if profile.seat_decision is not SeatDecision.SEAT:
+            why = _decision_why(profile)
+            tail = f" — {why}" if why else ""
+            print(
+                f"  {profile.seat_decision.value.upper()}: {model_id}{tail}",
+                file=sys.stderr,
+            )
     comp = report["panel_composition"]
     if "error" not in comp:
         panel = [(s["model_id"], round(s["reliability_weight"], 3)) for s in comp["seats"]]
@@ -701,6 +775,46 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001 — artifact write must not fail the run
             print(f"panel artifact NOT written: {exc!r}")
     print(f"report -> {args.out}")
+
+    # characterize-result-legibility-002: a DEGRADED run (failed models from Stage B) must
+    # SAY so to the operator — a thinned panel that still met quorum is not a full-strength
+    # result. Surfaced on stderr (the JSON report already carries `degraded`/`failed_models`).
+    if failed:
+        ids = [f["model_id"] for f in failed]
+        print(
+            f"\nDEGRADED RUN: {len(failed)} of {len(report['attempted_panel'])} model(s) "
+            f"failed and were dropped: {ids} — this panel is PARTIAL. "
+            f"See failed_models in {args.out}.",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    # characterize-result-legibility-001 + error-hint-sweep-002: the load-bearing PROVISIONAL
+    # caveat is the LAST thing the operator sees. On the default (no --human-labels) path the
+    # alt-test ω is a CIRCULAR model-jury bootstrap and the κ baseline is hardcoded (0.80), so
+    # every seat is PROVISIONAL and a sub-quorum panel escalates to the Claude Designer. The
+    # operator must NOT read the seated list as authoritative. On the human-grounded path the
+    # circular caveat is RETIRED — print the retired-caveat note instead. stderr keeps stdout
+    # clean; the same caveat lives machine-readably in report['alt_test_caveat'].
+    if human_labels is None:
+        print(
+            "\n*** PROVISIONAL RESULT — DO NOT treat this seated panel as authoritative ***\n"
+            "    alt-test ω is a CIRCULAR model-jury bootstrap (the reference 'annotators'\n"
+            "    are the other panel models) and the κ baseline is hardcoded (0.80, NOT\n"
+            "    human-measured). All seat decisions are PROVISIONAL until a human-labeling\n"
+            "    round runs; a sub-quorum panel escalates to the Claude Designer.\n"
+            "    Pass --human-labels for a non-circular, human-grounded alt-test.\n"
+            f"    See alt_test_caveat in {args.out}.",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            "\nNOTE: alt-test ω is HUMAN-GROUNDED this run (Fork C) — the circular "
+            "model-jury caveat is RETIRED; seats are NOT provisional on the alt-test axis.",
+            file=sys.stderr,
+            flush=True,
+        )
     return 0
 
 

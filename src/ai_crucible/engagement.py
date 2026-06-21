@@ -207,8 +207,13 @@ def assert_no_chrome_leak(messages: list[dict], chrome: Chrome) -> None:
                 if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", content):
                     role = message.get("role", "?")
                     raise SealedBoundaryViolation(
-                        f"Tier-3 chrome value {token!r} leaked into scored context "
-                        f"(message[{index}], role={role!r}). Motivation must stay "
-                        f"in chrome; the scored context must remain deployment-"
-                        f"shaped and framing-neutral (research-grounding §10.1(d,e))."
+                        f"[SEALED_BOUNDARY_LEAK] Tier-3 chrome value {token!r} leaked "
+                        f"into scored context (message[{index}], role={role!r}): "
+                        f"motivation and measurement shared a context window, so this "
+                        f"attempt's diagnostic is contaminated (research-grounding "
+                        f"§10.1(d,e)) "
+                        f"(hint: keep chrome (rank/leaderboard/standings) out of the "
+                        f"scored context — render it only in the human-facing wrapper "
+                        f"and pass it via AttemptState.chrome, never interpolated into a "
+                        f"message the model solves in)"
                     )
