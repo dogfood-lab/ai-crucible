@@ -42,6 +42,7 @@ ollama-intern + RTX 5090) plug into the same shape at Phase 2 with no kernel cha
 from __future__ import annotations
 
 import asyncio
+import math
 import statistics
 from collections import Counter
 from collections.abc import Awaitable, Callable
@@ -228,7 +229,24 @@ def reduce_scores(scores: list[Score], method: str) -> Score:
             raise ValueError(
                 "median reducer requires numeric Score.value entries"
             ) from exc
-        med = statistics.median(numeric)
+        # Drop non-finite (NaN/±inf) judge values BEFORE reducing (scoring-numerics-002).
+        # ``statistics.median`` over a list containing a NaN returns an
+        # ORDER-DEPENDENT NaN (the partition comparisons against NaN are all False),
+        # so a single broken judge would silently poison the panel score — exactly the
+        # outlier the median reducer exists to resist (§3, the panel-beats-one-judge
+        # property). We reduce over the finite peers and flag how many were dropped so
+        # the degradation is visible, not hidden. If EVERY value is non-finite there is
+        # no finite central estimate to report, so we fail with a clear reason rather
+        # than return a silent NaN (fail-closed, mirroring the empty-panel floor).
+        finite = [v for v in numeric if math.isfinite(v)]
+        dropped = len(numeric) - len(finite)
+        if not finite:
+            raise ValueError(
+                "median reducer: every judge value is non-finite (NaN/inf) — "
+                "no finite central estimate exists (scoring-numerics-002)"
+            )
+        base_meta["non_finite_dropped"] = dropped
+        med = statistics.median(finite)
         base_meta["median"] = med
         return Score(value=med, metadata=base_meta)
 
@@ -395,7 +413,10 @@ class JudgePanel:
             dropped for sharing the generator family, normalized), ``eligible_count``,
             ``untagged_judges_seated`` (model ids of admitted None-family judges —
             seated on operator trust, not proven cross-family, scoring-stats-002),
-            and the aggregated novelty verdict ``novelty_validated`` (+ the per-judge
+            ``judges_errored`` (id + error of any judge that RAISED and was dropped
+            from the reduction — a non-empty list means a DEGRADED partial panel,
+            scoring-numerics-001), and the aggregated novelty verdict
+            ``novelty_validated`` (+ the per-judge
             ``novelty_votes``) — the panel is the novelty authority (§8.7) and the
             kernel feeds this verdict into the oracle gate, never the Solver's or
             oracle_runner's self-report.
@@ -406,6 +427,12 @@ class JudgePanel:
                 cross-family judge, §3 PoLL requires ≥3 in practice). The message
                 names the offending generator family so the misconfiguration is
                 legible.
+            ValueError: if every eligible judge RAISED (a dead/flaky model
+                runtime), so zero scores survived — the empty-panel floor. A
+                *partial* failure (≥1 surviving judge) degrades gracefully instead
+                (scoring-numerics-001, SHARED GRADING-SEAM CONTRACT): the survivors
+                decide and the errored judges are recorded in
+                ``metadata['judges_errored']`` (id + error), never re-raised.
         """
         eligible = self.eligible_judges()
         if not eligible:
@@ -415,10 +442,42 @@ class JudgePanel:
                 "one judge from a different family (EXTERNAL_VERIFIER, §10.2)"
             )
 
-        # One observable fan-out; judges are independent so we gather concurrently.
-        scores = await asyncio.gather(*(judge(attempt) for judge in eligible))
+        # DEGRADE on a flaky judge (scoring-numerics-001, SHARED GRADING-SEAM
+        # CONTRACT). One observable fan-out; judges are independent so we gather
+        # concurrently with ``return_exceptions=True`` so ONE dead judge (e.g. the
+        # ollama daemon down, a load timeout) does not abort the whole panel and
+        # discard the survivors' completed work. We reduce over the SURVIVING scores
+        # and record each errored judge (id + error) in ``judges_errored`` for
+        # auditability. The §3 empty-panel ValueError is raised ONLY when ZERO judges
+        # survived (the floor) — a partial panel returns a Score, never a bare
+        # exception. (Agent A's kernel seam then catches the zero-survivor raise into
+        # a traced, degraded attempt; this half makes the partial-panel case never
+        # reach it.)
+        results = await asyncio.gather(
+            *(judge(attempt) for judge in eligible),
+            return_exceptions=True,
+        )
+        scores: list[Score] = []
+        judges_errored: list[dict[str, str]] = []
+        for judge, result in zip(eligible, results, strict=True):
+            if isinstance(result, BaseException):
+                judges_errored.append(
+                    {"judge": judge_model_id(judge), "error": str(result)}
+                )
+            else:
+                scores.append(result)
+        if not scores:
+            # Zero judges survived — the floor. No verdict exists to give; raise the
+            # empty-panel ValueError naming the failure so the kernel's andon (Agent
+            # A) can catch it into a traced, degraded attempt (§3, ANDON_AUTHORITY).
+            errs = "; ".join(f"{e['judge']}: {e['error']}" for e in judges_errored)
+            raise ValueError(
+                "no judges survived scoring — every eligible judge raised, so the "
+                f"panel has zero scores to reduce (errors: {errs}) "
+                "(EXTERNAL_VERIFIER floor, §3 / scoring-numerics-001)"
+            )
 
-        panel = reduce_scores(list(scores), self.reducer)
+        panel = reduce_scores(scores, self.reducer)
         gen = _norm_family(self.generator_family)
         excluded = sorted(
             {
@@ -441,6 +500,12 @@ class JudgePanel:
                 "excluded": excluded,
                 "eligible_count": len(eligible),
                 "untagged_judges_seated": untagged_seated,
+                # The judges that RAISED and were dropped from the reduction
+                # (scoring-numerics-001). Empty when every eligible judge scored;
+                # a non-empty list means the panel ruled on a DEGRADED (partial)
+                # set of survivors — surfaced so the degradation is visible to the
+                # kernel + audit, not hidden behind a clean verdict.
+                "judges_errored": judges_errored,
             }
         )
         return panel

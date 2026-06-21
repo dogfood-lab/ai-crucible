@@ -45,3 +45,19 @@
 - **D:** characterize/run.py + tests/test_characterize_run.py → characterize-degradation-001, 002, 004, 005.
 - **E:** models/ollama_adapter.py + models/claude_adapter.py + tests/test_models.py → models-ollama-resilience-001, 002, 003, 004.
 - **F:** instrument/tuning.py + inspect_task.py + sut.py + calibration/loader.py + tests/test_instrument.py + tests/test_calibration.py → instrument-future-deps-001, 002, 003, 004, 005.
+
+---
+
+## OUTCOME (closed 2026-06-21)
+
+5 fix agents, exclusive file ownership, **19/19 fixes red→green** (each test SIMULATES the failure — a raising oracle_runner/judge, NaN value, oversized file, daemon-down/malformed-body stub, hung call — and asserts the graceful outcome). Coordinator added the inspect-ai `<1` pin (Agent F's out-of-set recommendation) + re-locked.
+
+**Cross-stage catch (test-first discipline working):** Agent A's first grading-wrap cut swallowed the Critic-turn `ChromeAccessError` → would have silently undone the Stage-A sealed-boundary fix (a contaminated attempt degraded instead of halting). Caught by the pre-existing Stage-A test going RED; fixed by re-raising `SealedBoundaryViolation`/`ChromeAccessError` unwrapped at both the stage and outer catch. A contaminated attempt halts; everything else degrades.
+
+**Resilience now in place:** kernel post-Solver tail degrades to a traced ERROR attempt naming the failing stage (Solver transcript + eval_log preserved); pass^k isolates per-sibling grading failures; JudgePanel degrades over surviving judges (`judges_errored` metadata) with a zero-survivor floor; oracle rejects non-finite solve_quality/time_used; median reducer drops non-finite; puzzle loader size-guards the trust boundary; characterize surfaces failed models + salvages partial transcripts + bounds per-item time; model adapters get bounded retry/backoff + structured daemon-down/malformed-body/SDK-shape errors; sobol surfaces NaN; inspect-ai version drift warns at runtime + caps at <1; SUT rejects duplicate keys + non-ASCII versions; calibration loader bounds dir size; eval_log carries schema_version.
+
+**Build gate:** `verify.sh` GREEN — **520 → 576 tests** (+56), **93.01% → 94.50% coverage**, ruff clean, build+smoke OK.
+
+**Deferred to feature pass:** characterize-degradation-003 (checkpoint/resume — a designed durability feature, not a patch). **Dropped:** kernel-runtime-004 (FP). **Noted non-gating:** a pre-existing mypy nit in judge_panel.py (the 'weighted' reducer Score(value=object)) — mypy is not a CI/verify gate; left for a future typing cleanup.
+
+Stage B closed: **0 HIGH residual.** Proceed to Stage C (behavioral humanization).

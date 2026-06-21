@@ -44,6 +44,19 @@ The pipeline (research-grounding §10.2, composed top-to-bottom):
 6. **Write the trace** (:meth:`TraceWriter.to_eval_log`) and optionally append the
    eval-log to a :class:`ai_crucible.attestation.JsonlEventStore`.
 
+The post-Solver tail (steps 4–6: oracle grade, panel score, eval-log render/persist)
+is wrapped in a single degrade envelope (kernel-runtime-001). The grading host (§10.4)
+and the judge panel (§10.2 / §8.6) are the dependencies most likely to fail at runtime;
+a raw exception there would discard the Solver's completed (expensive) work with no
+trace and no diagnosable cause. Instead any failure stamps ``terminated_by = ERROR`` and
+a structured ``attempt.error`` NAMING the failing stage ('oracle grading' / 'panel
+scoring' / 'eval-log persist'), appends an error :class:`TraceEvent`, STILL renders +
+best-effort persists the eval-log so the Solver transcript survives, and returns the
+populated (degraded) attempt. A sealed-boundary andon
+(:class:`~ai_crucible.engagement.SealedBoundaryViolation` /
+:class:`~ai_crucible.roles.ChromeAccessError`) is the one thing NOT degraded — a
+contaminated attempt must HALT, never be returned as a graded result (§10.1(e)).
+
 Standards compliance (the six — workflow-standards.md):
 
 - **PIN_PER_STEP — 2:** every dependency is injected (``generate``, ``oracle_runner``,
@@ -55,8 +68,12 @@ Standards compliance (the six — workflow-standards.md):
   LIVE wall-clock (``check_time`` per turn + at the boundary, §8.4 / H3), or
   hard-kill breach halts the attempt with the right ``terminated_by`` (via the
   governor), and :func:`assert_no_chrome_leak` halts BEFORE the Solver AND re-runs
-  AFTER the Solver/Critic turns on a sealed-boundary violation. All are proven in
-  ``tests/test_kernel.py`` (BUDGET, TIME, HARD_KILL, and post-turn chrome leak).
+  AFTER the Solver/Critic turns on a sealed-boundary violation. The post-Solver
+  grading tail degrades a dead grading host / zero-survivor panel into a traced,
+  stage-named ``terminated_by == ERROR`` attempt rather than discarding the run
+  (kernel-runtime-001) — but a sealed-boundary andon is never degraded (it still
+  halts). All are proven in ``tests/test_kernel.py`` (BUDGET, TIME, HARD_KILL,
+  post-turn chrome leak, and the oracle/panel grading-failure degrade paths).
 - **NAMED_COMPENSATORS — 2:** the only irreversible local action the kernel takes
   is creating a sandbox workdir / event-log file; both are owned and torn down by
   their modules (:meth:`LocalSandbox.cleanup`, append-only ``JsonlEventStore``).
@@ -80,15 +97,16 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ai_crucible.budget import BudgetExceeded, BudgetGovernor
-from ai_crucible.engagement import assert_no_chrome_leak
+from ai_crucible.engagement import SealedBoundaryViolation, assert_no_chrome_leak
 from ai_crucible.framing import build_scored_context
 from ai_crucible.observability import PuzzleHistory
 from ai_crucible.puzzle import LoadedPuzzle, load_puzzle
-from ai_crucible.roles import Critic, GenerateFn, SandboxTools, Solver
+from ai_crucible.roles import ChromeAccessError, Critic, GenerateFn, SandboxTools, Solver
 from ai_crucible.sandbox import SandboxEnvironment
 from ai_crucible.scoring.judge_panel import JudgeFn, JudgePanel
 from ai_crucible.scoring.oracle import OracleOutcome, grade
@@ -346,64 +364,61 @@ async def run_attempt(
     # direct score-event appends below.
     mirrored = _mirror_events(writer, attempt, since=0)
 
-    # -- 4. Out-of-band oracle grading (§10.4) with PANEL-adjudicated novelty. - #
-    # Order matters (H2, §8.7): the cross-family panel is the novelty authority, so
-    # it must rule BEFORE the gate is computed and ITS verdict — never the
-    # oracle_runner's self-report — decides whether the novelty bonus applies. We
-    # therefore: (a) get the task verdict from the oracle_runner (solve / regression
-    # / penalties / budgets stay authoritative from it); (b) run the panel; (c)
-    # OVERRIDE outcome.novelty_validated with the panel verdict; (d) grade.
-    outcome = await oracle_runner(attempt, meta)
-
-    panel_score: Score | None = None
-    # A pre-composed panel (e.g. JudgePanel.from_seated — characterization → scoring,
-    # §11.4) is used as-is, carrying its OWN reducer + generator_family; otherwise build
-    # one from the injected judges. ``panel`` takes precedence over ``judges`` when both
-    # are given.
-    active_panel = panel
-    if active_panel is None and judges:
-        active_panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
-    if active_panel is not None:
-        panel_score = await active_panel.score(attempt)
-
-    # The oracle_runner is NOT trusted for novelty validation. With a panel, the
-    # panel's aggregated verdict governs; without a panel, an unvalidatable claim is
-    # never validated (you don't get to assert your own bonus, §8.3/§8.7). Solve and
-    # all other gate dimensions remain as the oracle_runner reported them.
-    if outcome.novelty_claimed:
-        outcome.novelty_validated = bool(
-            panel_score.metadata.get("novelty_validated")
-        ) if panel_score is not None else False
-
-    attempt.scores["oracle"] = grade(attempt, meta, outcome)
-    writer.append(
-        TraceEvent(kind="score", payload={"scorer": "oracle",
-                                          "value": attempt.scores["oracle"].value})
-    )
-
-    # -- 5. Record the panel score (EXTERNAL_VERIFIER, §10.2) + opt-in Critic. -- #
-    if panel_score is not None:
-        attempt.scores["panel"] = panel_score
-        writer.append(
-            TraceEvent(kind="score", payload={"scorer": "panel",
-                                              "value": panel_score.value})
+    # -- 4–6. Post-Solver grading / panel / eval-log, GRACEFULLY DEGRADED
+    # (kernel-runtime-001). The Solver's turn is done and its transcript is captured;
+    # the remaining steps each depend on a runtime edge most likely to fail (the
+    # SEPARATE grading host per §10.4, the cross-family judge panel per §10.2/§8.6).
+    # A raw exception here would discard an expensive completed run with no trace and
+    # no diagnosable cause. Instead we wrap the whole block: on ANY failure we stamp
+    # terminated_by = ERROR, set a structured attempt.error NAMING the failing stage
+    # ('oracle grading' / 'panel scoring' / 'eval-log persist'), append an error
+    # TraceEvent, STILL render + best-effort persist the eval_log so the Solver
+    # transcript survives, and RETURN the populated (degraded) attempt rather than
+    # re-raising (SHARED GRADING-SEAM CONTRACT, Agent A). A flaky single judge is
+    # degraded one level down by JudgePanel.score (a partial panel, no raise); only a
+    # zero-survivor panel or a dead grading host reaches this catch.
+    try:
+        await _grade_and_panel(
+            attempt,
+            meta,
+            writer,
+            oracle_runner=oracle_runner,
+            judges=judges,
+            panel=panel,
+            panel_reducer=panel_reducer,
+            generator_family=generator_family,
+            enable_critic=enable_critic,
+            generate=generate,
+            solver=solver,
+            mirrored=mirrored,
         )
+    except (SealedBoundaryViolation, ChromeAccessError):
+        # A sealed-boundary andon is NOT a degradable grading failure — a contaminated
+        # attempt must HALT, never be returned as a degraded result (§10.1(e)). It
+        # propagates past the degrade path unchanged (it already rendered no eval_log,
+        # by design — a leaked attempt is never gradeable/persistable).
+        raise
+    except Exception as exc:  # noqa: BLE001 — degrade, don't discard the Solver's work.
+        _degrade_into_error(attempt, writer, exc)
 
-    if enable_critic:
-        critic = Critic(_wrap_generate(generate, solver), enabled=True)
-        attempt = await critic.act(attempt)
-        # Sealed-boundary re-check AFTER the Critic turn (H1, §10.1(e)). The Critic
-        # appends/edits messages (string-in/string-out), so it is another
-        # message-mutating site the andon must cover with the same strong guard.
-        _assert_no_chrome_leak_if_present(attempt)
-        mirrored = _mirror_events(writer, attempt, since=mirrored)
-
-    # -- 6. Render the Inspect-shaped eval-log + optional durable append (§9.5). #
+    # -- Render the Inspect-shaped eval-log + best-effort durable append (§9.5). --
+    # Always runs — on the happy path AND after a degraded grading failure — so the
+    # Solver transcript is rendered (and persisted if a store is given) even when
+    # grading died. A persist failure is itself degraded into the ERROR stage rather
+    # than masking the (possibly already-stamped) grading cause.
     eval_log = writer.to_eval_log(attempt)
     attempt.metadata["eval_log"] = eval_log
     if event_store is not None:
-        # JsonlEventStore.append (or any object exposing append(dict) -> str).
-        event_store.append(eval_log)  # type: ignore[attr-defined]
+        try:
+            # JsonlEventStore.append (or any object exposing append(dict) -> str).
+            event_store.append(eval_log)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — persist is best-effort; trace + return.
+            if attempt.terminated_by not in (TerminatedBy.ERROR,):
+                _degrade_into_error(attempt, writer, exc, stage="eval-log persist")
+            # Re-render so the eval_log on the attempt reflects the persist-failure
+            # error stamp (the in-memory record stays consistent even though the
+            # durable append did not land).
+            attempt.metadata["eval_log"] = writer.to_eval_log(attempt)
 
     return attempt
 
@@ -427,6 +442,14 @@ async def run_pass_hat_k(
     The puzzle is loaded once and the :class:`LoadedPuzzle` reused across siblings
     (the oracle is never in it, §10.4), so a directory ``path`` is read from disk a
     single time.
+
+    **Per-sibling isolation (kernel-runtime-001).** A grading failure in one sibling
+    (dead grading host, zero-survivor panel) does NOT abort the cohort: :func:`run_attempt`
+    degrades that sibling into a returned ``terminated_by == ERROR`` attempt rather than
+    raising, so it is recorded as a non-solve (a non-COMPLETED attempt never counts as a
+    solve, finding 6) and the remaining siblings still run and are counted. A
+    sealed-boundary violation is the exception — it propagates (a contaminated framing
+    breaks the whole cohort), by design.
 
     Args:
         puzzle: a loaded puzzle or path; loaded once and shared across siblings.
@@ -515,6 +538,160 @@ def _mirror_events(writer: TraceWriter, attempt: AttemptState, *, since: int) ->
             )
         )
     return len(attempt.events)
+
+
+async def _grade_and_panel(
+    attempt: AttemptState,
+    meta: PuzzleMeta,
+    writer: TraceWriter,
+    *,
+    oracle_runner: OracleRunner,
+    judges: list[JudgeFn] | None,
+    panel: JudgePanel | None,
+    panel_reducer: str,
+    generator_family: str | None,
+    enable_critic: bool,
+    generate: GenerateFn,
+    solver: Solver,
+    mirrored: int,
+) -> None:
+    """Steps 4–6 of the pipeline (oracle grade + panel score + opt-in Critic), with
+    each failing stage NAMED so :func:`_degrade_into_error` can label the cause.
+
+    Order matters (H2, §8.7): the cross-family panel is the novelty authority, so it
+    must rule BEFORE the gate is computed and ITS verdict — never the oracle_runner's
+    self-report — decides whether the novelty bonus applies. We therefore: (a) get the
+    task verdict from the oracle_runner (solve / regression / penalties / budgets stay
+    authoritative from it); (b) run the panel; (c) OVERRIDE outcome.novelty_validated
+    with the panel verdict; (d) grade. Each ``await`` on a runtime edge is wrapped so a
+    failure re-raises as a :class:`_GradingStageError` naming the stage; the caller's
+    single try/except degrades that into a traced, returned attempt. The opt-in Critic
+    turn (and its post-turn sealed-boundary re-check + event mirroring) runs here too,
+    so the whole post-Solver tail shares one degrade envelope. Mutates ``attempt`` and
+    ``writer`` in place (returns nothing).
+    """
+    # -- 4. Out-of-band oracle grading (§10.4) with PANEL-adjudicated novelty. - #
+    with _stage("oracle grading"):
+        outcome = await oracle_runner(attempt, meta)
+
+    panel_score: Score | None = None
+    # A pre-composed panel (e.g. JudgePanel.from_seated — characterization → scoring,
+    # §11.4) is used as-is, carrying its OWN reducer + generator_family; otherwise build
+    # one from the injected judges. ``panel`` takes precedence over ``judges`` when both
+    # are given.
+    active_panel = panel
+    if active_panel is None and judges:
+        active_panel = JudgePanel(judges, reducer=panel_reducer, generator_family=generator_family)
+    if active_panel is not None:
+        with _stage("panel scoring"):
+            panel_score = await active_panel.score(attempt)
+
+    # The oracle_runner is NOT trusted for novelty validation. With a panel, the
+    # panel's aggregated verdict governs; without a panel, an unvalidatable claim is
+    # never validated (you don't get to assert your own bonus, §8.3/§8.7). Solve and
+    # all other gate dimensions remain as the oracle_runner reported them.
+    if outcome.novelty_claimed:
+        outcome.novelty_validated = bool(
+            panel_score.metadata.get("novelty_validated")
+        ) if panel_score is not None else False
+
+    attempt.scores["oracle"] = grade(attempt, meta, outcome)
+    writer.append(
+        TraceEvent(kind="score", payload={"scorer": "oracle",
+                                          "value": attempt.scores["oracle"].value})
+    )
+
+    # -- 5. Record the panel score (EXTERNAL_VERIFIER, §10.2) + opt-in Critic. -- #
+    if panel_score is not None:
+        attempt.scores["panel"] = panel_score
+        writer.append(
+            TraceEvent(kind="score", payload={"scorer": "panel",
+                                              "value": panel_score.value})
+        )
+
+    if enable_critic:
+        with _stage("critic"):
+            critic = Critic(_wrap_generate(generate, solver), enabled=True)
+            attempt = await critic.act(attempt)
+        # Sealed-boundary re-check AFTER the Critic turn (H1, §10.1(e)). The Critic
+        # appends/edits messages (string-in/string-out), so it is another
+        # message-mutating site the andon must cover with the same strong guard. This
+        # andon is INTENTIONALLY outside the degrade path: a contaminated attempt must
+        # halt (it is never gradeable), not be returned as a degraded result.
+        _assert_no_chrome_leak_if_present(attempt)
+        # Mirror the Critic's newly-appended role events into the kernel-owned writer
+        # (the caller renders the eval-log from the writer right after this returns).
+        _mirror_events(writer, attempt, since=mirrored)
+
+
+class _GradingStageError(RuntimeError):
+    """Internal: wraps a post-Solver stage failure with the stage name attached, so
+    :func:`_degrade_into_error` can build a structured, stage-naming attempt.error
+    (kernel-runtime-001). Never escapes :func:`run_attempt`."""
+
+    def __init__(self, stage: str, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.stage = stage
+        self.__cause__ = cause
+
+
+@contextmanager
+def _stage(name: str) -> Iterator[None]:
+    """Tag any exception raised inside the block with the failing pipeline ``name``.
+
+    A sealed-boundary andon is NOT a degradable grading failure — a contaminated
+    attempt must HALT, never be returned as a degraded result — so a
+    :class:`SealedBoundaryViolation` or the Critic-turn role :class:`ChromeAccessError`
+    (and a deliberately-raised :class:`_GradingStageError`) propagate unwrapped. Every
+    other exception becomes a stage-named :class:`_GradingStageError` so the caller's
+    single catch can name 'oracle grading' vs 'panel scoring' vs 'critic' in the
+    structured error.
+    """
+    try:
+        yield
+    except (SealedBoundaryViolation, ChromeAccessError, _GradingStageError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — re-raise tagged with the stage.
+        raise _GradingStageError(name, exc) from exc
+
+
+def _degrade_into_error(
+    attempt: AttemptState,
+    writer: TraceWriter,
+    exc: BaseException,
+    *,
+    stage: str | None = None,
+) -> None:
+    """Stamp a post-Solver failure onto the attempt as a traced, structured ERROR.
+
+    The Solver's completed work is preserved; only the grading/persist tail failed.
+    Sets ``terminated_by = ERROR`` and a structured ``attempt.error`` (Ship-Gate-B
+    code/message/hint shape) NAMING the failing stage, and appends an error
+    :class:`TraceEvent` to the kernel-owned writer so the eval-log records WHY the
+    attempt degraded (kernel-runtime-001). Does NOT re-raise — the caller returns the
+    degraded attempt.
+    """
+    failing_stage = stage or getattr(exc, "stage", None) or "grading"
+    message = (
+        f"[GRADING_FAILED] post-Solver {failing_stage} raised "
+        f"{type(exc).__name__}: {exc} "
+        f"(hint: the Solver transcript is preserved in this attempt's eval_log; "
+        f"the {failing_stage} edge — the out-of-band grading host (§10.4) or the "
+        f"cross-family judge panel (§10.2) — failed at runtime and was degraded "
+        f"rather than discarding the run; inspect/retry that edge)"
+    )
+    attempt.terminated_by = TerminatedBy.ERROR
+    attempt.error = message
+    payload = {
+        "terminated_by": TerminatedBy.ERROR.value,
+        "stage": failing_stage,
+        "message": message,
+    }
+    # Append to BOTH the live attempt trace (so a caller reading attempt.events sees
+    # the failure, mirroring the budget-breach convention at the Solver boundary) and
+    # the kernel-owned writer (so the rendered eval-log records WHY it degraded).
+    attempt.events.append(TraceEvent(kind="error", payload=dict(payload), seq=len(attempt.events)))
+    writer.append(TraceEvent(kind="error", payload=dict(payload)))
 
 
 def _assert_no_chrome_leak_if_present(attempt: AttemptState) -> None:

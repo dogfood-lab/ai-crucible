@@ -27,12 +27,30 @@ from pydantic import ValidationError
 
 from ai_crucible.types import PuzzleMeta
 
-__all__ = ["LoadedPuzzle", "PuzzleLoadError", "load_puzzle"]
+__all__ = [
+    "LoadedPuzzle",
+    "MAX_META_BYTES",
+    "MAX_PROMPT_BYTES",
+    "PuzzleLoadError",
+    "load_puzzle",
+]
 
 # Canonical filenames inside a puzzle directory.
 _META_FILE = "meta.json"
 _PROMPT_FILE = "prompt"
 _SETUP_FILE = "setup_script"
+
+# Size caps at the §1 trust boundary (kernel-runtime-003). A puzzle directory is
+# an external/authored artifact — the FIRST place untrusted-author content enters
+# the kernel — so the loader stat()s each file and refuses an oversized read
+# rather than slurping an arbitrarily large file into memory and OOMing before any
+# budget/sandbox limit applies (the sandbox caps subprocess output at 1 MiB via
+# DEFAULT_MAX_OUTPUT_BYTES; this is the input-side equivalent). meta.json is a
+# small contract (~1 MiB is generous); the prompt is the Solver-visible body and
+# may legitimately be larger (a few MiB). Both are overridable per call so a caller
+# with an unusual artifact can raise the ceiling deliberately.
+MAX_META_BYTES = 1 * 1024 * 1024        # ~1 MiB
+MAX_PROMPT_BYTES = 4 * 1024 * 1024      # ~4 MiB
 
 # Filenames that hold (or plausibly hold) the answer artifact. The loader
 # refuses to read these and refuses to expose them, so the Solver-visible
@@ -68,17 +86,31 @@ def _fail(code: str, message: str, hint: str) -> PuzzleLoadError:
     return PuzzleLoadError(f"[{code}] {message} (hint: {hint})")
 
 
-def load_puzzle(path: Path) -> LoadedPuzzle:
+def load_puzzle(
+    path: Path,
+    *,
+    max_meta_bytes: int = MAX_META_BYTES,
+    max_prompt_bytes: int = MAX_PROMPT_BYTES,
+) -> LoadedPuzzle:
     """Load the puzzle directory at ``path`` into a :class:`LoadedPuzzle`.
 
     Reads ``meta.json`` (validated via :class:`PuzzleMeta`), the ``prompt`` file,
     and resolves ``setup_script`` if present. Never reads any oracle/answer
-    artifact (§10.4).
+    artifact (§10.4). Each file is size-checked (``stat()``) before it is read so
+    an oversized authored artifact is refused at the §1 trust boundary instead of
+    OOMing the kernel (kernel-runtime-003).
+
+    Args:
+        path: the puzzle directory (the one containing ``meta.json``).
+        max_meta_bytes: ceiling for ``meta.json`` (default :data:`MAX_META_BYTES`).
+        max_prompt_bytes: ceiling for the ``prompt`` file (default
+            :data:`MAX_PROMPT_BYTES`).
 
     Raises:
-        PuzzleLoadError: directory missing, required file missing, ``meta.json``
-            is not valid JSON, or ``meta.json`` fails :class:`PuzzleMeta`
-            validation.
+        PuzzleLoadError: directory missing, required file missing, a required file
+            exceeds its size cap (``INPUT_META_TOO_LARGE`` / ``INPUT_PROMPT_TOO_LARGE``),
+            ``meta.json`` is not valid JSON, or ``meta.json`` fails
+            :class:`PuzzleMeta` validation.
     """
     root = Path(path)
     if not root.is_dir():
@@ -88,14 +120,33 @@ def load_puzzle(path: Path) -> LoadedPuzzle:
             "pass the path to a puzzle directory (the one containing meta.json)",
         )
 
-    meta = _load_meta(root)
-    prompt = _load_prompt(root)
+    meta = _load_meta(root, max_bytes=max_meta_bytes)
+    prompt = _load_prompt(root, max_bytes=max_prompt_bytes)
     setup_script = _resolve_setup(root)
 
     return LoadedPuzzle(meta=meta, prompt=prompt, setup_script=setup_script, root=root)
 
 
-def _load_meta(root: Path) -> PuzzleMeta:
+def _guard_size(path: Path, *, code: str, label: str, max_bytes: int) -> None:
+    """Refuse a file larger than ``max_bytes`` BEFORE it is read whole into memory.
+
+    The §1 trust boundary: a puzzle directory is an external/authored artifact, so
+    the loader stat()s each required file and rejects an oversized one with a
+    structured :class:`PuzzleLoadError` (code/message/hint, size + cap in the hint)
+    rather than slurping it via ``read_text`` and OOMing the process. Mirrors the
+    sandbox's deliberate output cap on the input side (kernel-runtime-003).
+    """
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise _fail(
+            code,
+            f"{label} is {size} bytes, over the {max_bytes}-byte cap",
+            f"the puzzle {label} exceeds the size ceiling ({size} > {max_bytes} bytes); "
+            "shrink the file or raise the cap explicitly via load_puzzle(...)",
+        )
+
+
+def _load_meta(root: Path, *, max_bytes: int) -> PuzzleMeta:
     meta_path = root / _META_FILE
     if not meta_path.is_file():
         raise _fail(
@@ -103,6 +154,7 @@ def _load_meta(root: Path) -> PuzzleMeta:
             f"missing {_META_FILE} in {root}",
             f"every puzzle directory must contain a {_META_FILE} file",
         )
+    _guard_size(meta_path, code="INPUT_META_TOO_LARGE", label=_META_FILE, max_bytes=max_bytes)
     try:
         raw = json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -134,7 +186,7 @@ def _load_meta(root: Path) -> PuzzleMeta:
         ) from exc
 
 
-def _load_prompt(root: Path) -> str:
+def _load_prompt(root: Path, *, max_bytes: int) -> str:
     prompt_path = root / _PROMPT_FILE
     if not prompt_path.is_file():
         raise _fail(
@@ -143,6 +195,9 @@ def _load_prompt(root: Path) -> str:
             f"every puzzle directory must contain a {_PROMPT_FILE} file "
             "(what the Solver sees)",
         )
+    _guard_size(
+        prompt_path, code="INPUT_PROMPT_TOO_LARGE", label=_PROMPT_FILE, max_bytes=max_bytes
+    )
     return prompt_path.read_text(encoding="utf-8")
 
 

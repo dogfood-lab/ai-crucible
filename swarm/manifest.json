@@ -11,7 +11,9 @@
     "verify": "green",
     "note": "README badge claims 96% — drift to fix (actual 91.5%)",
     "post_stage_a_tests": 520,
-    "post_stage_a_coverage_pct": 93.01
+    "post_stage_a_coverage_pct": 93.01,
+    "post_stage_b_tests": 576,
+    "post_stage_b_coverage_pct": 94.5
   },
   "cross_family_verifiers": {
     "roster_live_verified_2026-06-21": {
@@ -54,6 +56,6 @@
   },
   "phases": {
     "stage-a": "Bug/Security/Correctness/Eval-integrity audit -> cross-family verify -> review gate -> amend (v2 mechanics)",
-    "status": "stage-a CLOSED (0 CRIT/0 HIGH residual; 520 tests, 93.01% cov); next stage-b"
+    "status": "stage-b CLOSED (0 HIGH residual; 576 tests, 94.5% cov); next stage-c humanization"
   }
 }

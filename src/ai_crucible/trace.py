@@ -29,7 +29,18 @@ from typing import Any
 
 from ai_crucible.types import AttemptState, RoleName, Score, TraceEvent
 
-__all__ = ["TraceWriter", "attachment_ref", "sha256_hex"]
+__all__ = ["EVAL_LOG_SCHEMA_VERSION", "TraceWriter", "attachment_ref", "sha256_hex"]
+
+# Self-describing schema marker stamped onto every emitted eval-log (kernel-runtime-005).
+# The envelope is hand-shaped to match "Inspect EvalLog v2" but is a plain dict (it
+# neither pins nor breaks against Inspect's evolving pydantic surface). inspect-ai is
+# pinned >=0.3 with an open upper bound, so the shape this mirrors can move. Without a
+# version key a future envelope change (a renamed top-level field, a consumer expecting a
+# marker) would be SILENT — a reader would misparse or drop fields with no error, and
+# persisted attestation JSONL records could not be told apart by schema version after the
+# fact. The marker is ai_crucible-namespaced so it is unambiguous which schema authored a
+# persisted record; bump it whenever the top-level envelope shape changes.
+EVAL_LOG_SCHEMA_VERSION = "crucible/evallog/2"
 
 # Blobs at or above this size (chars) are spilled to an attachment rather than
 # left inline in the event payload. Below it, inlining is cheaper than a digest
@@ -163,11 +174,13 @@ class TraceWriter:
         ``dict`` (finding 5).
 
         The returned dict has the documented top-level keys ``eval`` / ``plan``
-        / ``results`` / ``stats`` / ``samples`` plus an ``attachments`` map. The
-        single sample carries ``id, input, target, output, scores, events,
-        metadata, error`` — AI Crucible runs one attempt per record (pass^k is k
-        *sibling* records, not k samples in one log, per finding 6, handled by
-        :mod:`ai_crucible.observability`).
+        / ``results`` / ``stats`` / ``samples`` plus an ``attachments`` map and a
+        self-describing ``schema_version`` marker (:data:`EVAL_LOG_SCHEMA_VERSION`,
+        kernel-runtime-005) so a downstream consumer can branch on envelope drift and
+        a persisted record stays version-legible. The single sample carries
+        ``id, input, target, output, scores, events, metadata, error`` — AI Crucible
+        runs one attempt per record (pass^k is k *sibling* records, not k samples in
+        one log, per finding 6, handled by :mod:`ai_crucible.observability`).
 
         ``input`` is the scored message context (Tier-1/Tier-2 only); Tier-3
         ``chrome`` is **never** serialized here — it is not part of the scored
@@ -212,6 +225,9 @@ class TraceWriter:
         }
 
         return {
+            # Self-describing schema marker so a consumer can detect/branch on drift
+            # and persisted records are version-legible after the fact (kernel-runtime-005).
+            "schema_version": EVAL_LOG_SCHEMA_VERSION,
             "eval": eval_spec,
             "plan": plan,
             "results": results,

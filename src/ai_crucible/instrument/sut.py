@@ -98,13 +98,20 @@ class SUT:
 def _looks_like_family_alias(model_id: str) -> bool:
     """Heuristic: a model id with no version/snapshot component is an alias.
 
-    We treat an id as "exact" if it contains a digit (a date stamp like
-    ``-20260415`` or a version like ``-4-7``). A bare family name
+    We treat an id as "exact" only if it contains an **ASCII** digit (a date
+    stamp like ``-20260415`` or a version like ``-4-7``). A bare family name
     (``claude-opus``, ``gpt``, ``mistral-large``) has none and is the §9.6
     failure mode. This is a guardrail, not a proof — an exact-looking id can
     still be wrong; the check catches the obvious, common mistake.
+
+    The digit test is ASCII-only on purpose: ``str.isdigit()`` is true for
+    non-ASCII digits and superscripts (Arabic-Indic numerals, superscript ``²``,
+    etc.), so a decorative-Unicode family name like ``"claude-opus²"`` would
+    otherwise sneak past the guardrail as if it carried a real version. No
+    provider snapshot string uses non-ASCII digits, so requiring ``0-9`` keeps
+    the §9.6 guardrail tight without rejecting any legitimate id.
     """
-    return not any(ch.isdigit() for ch in model_id)
+    return not any(ch in "0123456789" for ch in model_id)
 
 
 def _yaml_scalar(value: str) -> str:
@@ -165,14 +172,31 @@ def parse_sut_yaml(text: str) -> SUT:
     general YAML parser — it is the inverse of :func:`render_sut_yaml` so the
     round-trip is provable and an auditor has a tiny, dependency-free reference.
 
+    Because the SUT is the frozen reproducibility record, the parser is STRICT:
+    a duplicate key (which a permissive last-wins parse would silently resolve,
+    quietly discarding one pinned value) and an indented / non-``key: value`` line
+    (an unrepresentable nested structure this flat format cannot honor) are both
+    rejected with a structured :class:`SUTError` rather than accepted ambiguously.
+
     Raises:
-        SUTError: a required field is missing or a line is malformed.
+        SUTError: a required field is missing, a line is malformed or indented, or
+            a key appears more than once (ambiguous pin).
     """
     found: dict[str, str] = {}
     for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
+        # An indented line implies nested/list YAML this flat format cannot
+        # represent — reject it rather than silently flattening or misreading it.
+        if raw[:1].isspace():
+            raise _fail(
+                "INPUT_SUT_BAD_LINE",
+                f"SUT.yaml has an indented line (unsupported nested structure): "
+                f"{raw.rstrip()!r}",
+                "render_sut_yaml emits only flat 'key: \"value\"' lines; nested "
+                "or list YAML is not a valid SUT record",
+            )
+        line = raw.strip()
         if ":" not in line:
             raise _fail(
                 "INPUT_SUT_BAD_LINE",
@@ -185,6 +209,14 @@ def parse_sut_yaml(text: str) -> SUT:
         # Unwrap a double-quoted scalar.
         if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
             value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+        if key in found:
+            raise _fail(
+                "INPUT_SUT_DUPLICATE_KEY",
+                f"SUT.yaml declares key {key!r} more than once",
+                "the frozen SUT record must pin each field exactly once; a "
+                "duplicate key is ambiguous (a last-wins parse would silently "
+                "discard one value — §9.6 reproducibility)",
+            )
         found[key] = value
 
     missing = [f for f in SUT_FIELDS if f not in found]

@@ -263,6 +263,14 @@ def sobol_screen(
     Raises:
         TuningError: ``param_names`` and ``bounds`` length mismatch, empty
             params, or a degenerate bound (low >= high).
+        TuningError: a non-finite (NaN/inf) ``objective`` output — caught at the
+            source and surfaced rather than silently masked. A NaN objective is
+            otherwise swallowed twice (scipy's variance ratio collapses a NaN
+            sample to a clean total-effect 0.0, and ``max(0.0, nan) == 0.0`` clips
+            it again), which FREEZES a possibly load-bearing weight as
+            zero-sensitivity (the §9.4 step-2 failure this screen exists to
+            prevent). The screen halts (ANDON) so the operator fixes the
+            objective rather than tuning on a silently-frozen surface.
     """
     names = list(param_names)
     bnds = [tuple(b) for b in bounds]
@@ -290,8 +298,31 @@ def sobol_screen(
         dists.append(uniform(loc=low, scale=high - low))
 
     n_eff = _nearest_power_of_two(int(n))
+
+    # ANDON: detect a non-finite objective AT THE SOURCE. A NaN/inf returned by
+    # the objective is otherwise masked twice — once inside scipy's variance
+    # ratio (a NaN sample collapses the total-effect estimate to a clean 0.0),
+    # and again by ``max(0.0, T_i)`` below — so the index alone cannot reveal it.
+    # Left unguarded, a NaN objective FREEZES a possibly load-bearing weight as
+    # zero-sensitivity, the exact §9.4 step-2 defect this screen exists to
+    # prevent. Wrap the objective so a non-finite output halts the screen instead
+    # of silently reporting T_i=0.0.
+    def _guarded_model_fn(x: np.ndarray) -> np.ndarray:
+        out = np.asarray(model_fn(x), dtype=float)
+        if not np.all(np.isfinite(out)):
+            raise _fail(
+                "STATE_SOBOL_NONFINITE_OBJECTIVE",
+                "sobol_screen objective (model_fn) returned a non-finite "
+                "(NaN/inf) value for at least one Saltelli sample",
+                "a non-finite objective is silently masked to total-effect 0.0 "
+                "and freezes a possibly load-bearing weight as zero-sensitivity "
+                "— fix the objective to return finite scalars over the whole "
+                "bounds box (§9.4 step 2)",
+            )
+        return out
+
     result = sobol_indices(
-        func=model_fn,
+        func=_guarded_model_fn,
         n=n_eff,
         dists=dists,
         method="saltelli_2010",

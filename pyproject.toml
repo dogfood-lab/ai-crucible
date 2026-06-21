@@ -21,7 +21,11 @@ classifiers = [
 
 # Kernel is a thin policy layer on Inspect AI (research-grounding §10.2).
 dependencies = [
-  "inspect-ai>=0.3",
+  # Upper bound: inspect-ai is pre-1.0 and the kernel sits directly on its
+  # Task/Sample/EvalLog surfaces — cap at <1 so a 1.0 API break can't be pulled
+  # silently on a fresh install. The instrument.inspect_task runtime check warns
+  # within 0.x when the installed minor leaves the tested range (instrument-future-deps-002).
+  "inspect-ai>=0.3,<1",
   "pydantic>=2.5",
   "numpy>=1.26",
   "scipy>=1.11",       # scipy.stats.sobol_indices (tuning), Clopper-Pearson

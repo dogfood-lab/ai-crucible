@@ -34,6 +34,16 @@ __all__ = ["CalibrationLoadError", "load_default", "load_items"]
 # Directory holding the bundled starter bank (sibling of this module).
 _ITEMS_DIR = Path(__file__).parent / "items"
 
+# Resource bounds at the calibration trust boundary (an operator-supplied dir is
+# external/authored content — §11.3). Without a ceiling, a directory with tens of
+# thousands of files, or a single multi-gigabyte JSON, is slurped whole via
+# read_text and can OOM the process before any validation runs. These caps make
+# the loader fail with a structured error instead. They are generous (the real
+# bank is ~14 files of a few KB each; the discriminating pair-set ~80-150) so they
+# never trip on legitimate input, and overridable for a deliberately large bank.
+_MAX_FILE_BYTES = 16 * 1024 * 1024  # 16 MiB per JSON file
+_MAX_DIR_FILES = 10_000  # *.json files in a single operator directory
+
 # Required (no-default) fields on CalibrationItem that every record must supply.
 _REQUIRED_STR_FIELDS = ("id", "construct", "confound_controlled", "prompt")
 
@@ -81,9 +91,11 @@ def load_items(path: Path) -> list[CalibrationItem]:
     Each record is validated into a :class:`CalibrationItem`.
 
     Raises:
-        CalibrationLoadError: path missing; a file is not valid JSON; JSON is not
-            an object or list-of-objects; a record is missing a required field,
-            has a wrong field type, names an unknown ``category``, or carries an
+        CalibrationLoadError: path missing; a directory exceeds the file-count
+            cap or a file exceeds the per-file size cap (resource bounds at the
+            trust boundary, §11.3); a file is not valid JSON; JSON is not an
+            object or list-of-objects; a record is missing a required field, has a
+            wrong field type, names an unknown ``category``, or carries an
             unexpected key; or duplicate item ids are found across the source.
     """
     root = Path(path)
@@ -136,6 +148,16 @@ def _read_dir(root: Path) -> list[tuple[dict[str, Any], Path]]:
             f"no .json files found in directory {root}",
             "put one or more *.json item files in the directory",
         )
+    # Resource bound: refuse an unreasonably large operator directory before
+    # reading any of it (§11.3 trust boundary). A clean rejection beats an OOM.
+    if len(files) > _MAX_DIR_FILES:
+        raise _fail(
+            "INPUT_DIR_TOO_MANY_FILES",
+            f"calibration directory {root} has {len(files)} .json files, over the "
+            f"{_MAX_DIR_FILES} cap",
+            "split the bank or raise _MAX_DIR_FILES deliberately; the cap guards "
+            "against reading an unbounded operator directory into memory",
+        )
     out: list[tuple[dict[str, Any], Path]] = []
     for file in files:
         out.extend(_read_file(file))
@@ -143,6 +165,25 @@ def _read_dir(root: Path) -> list[tuple[dict[str, Any], Path]]:
 
 
 def _read_file(file: Path) -> list[tuple[dict[str, Any], Path]]:
+    # Resource bound: stat the file and refuse an oversized one before slurping
+    # it into memory via read_text (§11.3 trust boundary; mirrors the sandbox's
+    # output cap). A multi-GiB JSON would otherwise OOM the loader.
+    try:
+        size = file.stat().st_size
+    except OSError as exc:
+        raise _fail(
+            "INPUT_FILE_UNREADABLE",
+            f"cannot stat calibration file {file.name}: {exc}",
+            f"ensure {file.name} exists and is readable",
+        ) from exc
+    if size > _MAX_FILE_BYTES:
+        raise _fail(
+            "INPUT_FILE_TOO_LARGE",
+            f"calibration file {file.name} is {size} bytes, over the "
+            f"{_MAX_FILE_BYTES}-byte cap",
+            "a calibration JSON file should be small (items, not corpora); split "
+            "the file or raise _MAX_FILE_BYTES deliberately",
+        )
     try:
         raw = json.loads(file.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

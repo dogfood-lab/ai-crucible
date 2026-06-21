@@ -122,6 +122,18 @@ def make_judge(family: str | None, value: object) -> JudgeFn:
     return _judge
 
 
+def make_raising_judge(family: str | None, exc: Exception) -> JudgeFn:
+    """An injected judge that RAISES — simulates a dead/flaky model runtime
+    (scoring-numerics-001, the SHARED GRADING-SEAM CONTRACT degradation probe)."""
+
+    async def _judge(_attempt: AttemptState) -> Score:
+        raise exc
+
+    _judge.family = family  # type: ignore[attr-defined]
+    _judge.model_id = f"raiser:{family}"  # type: ignore[attr-defined]
+    return _judge
+
+
 # --------------------------------------------------------------------------- #
 # stats — pass_hat_k
 # --------------------------------------------------------------------------- #
@@ -955,3 +967,169 @@ def test_panel_surfaces_novelty_validated_verdict(
     )
     result = asyncio.run(panel.score(scoring_attempt))
     assert result.metadata["novelty_validated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — DEGRADE on a flaky judge (scoring-numerics-001, SHARED CONTRACT)
+# --------------------------------------------------------------------------- #
+
+
+def test_panel_degrades_when_one_judge_raises(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-numerics-001 (RED→GREEN, SHARED GRADING-SEAM CONTRACT): a single
+    raising judge (a dead/flaky model runtime) must NOT abort the whole panel.
+    ``JudgePanel.score`` rules on the SURVIVING judges and records the errored
+    judge (id + error) in ``panel.metadata['judges_errored']`` — a partial panel
+    returns a Score, never a bare exception, as long as ≥1 judge survives."""
+    panel = JudgePanel(
+        judges=[
+            make_raising_judge("qwen", RuntimeError("ollama daemon down")),
+            make_judge("mistral", True),
+            make_judge("cohere", True),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # Survivors decided: majority of [True, True] -> True (qwen never voted).
+    assert result.value is True
+    assert result.metadata["votes"] == [True, True]
+    # The errored judge is recorded for auditability (id + error), not silenced.
+    errored = result.metadata["judges_errored"]
+    assert len(errored) == 1
+    assert errored[0]["judge"] == "raiser:qwen"
+    assert "ollama daemon down" in errored[0]["error"]
+    # eligible_count reflects the judges that were RUN; survivors that produced a
+    # score are the panel.
+    assert result.metadata["eligible_count"] == 3
+
+
+def test_panel_empty_when_all_judges_raise_floor_raises(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-numerics-001 (the floor): if EVERY judge raises, zero scores
+    survive — there is no verdict to give, so the existing empty-panel ValueError
+    is the floor (SHARED CONTRACT: raise ONLY when zero judges survived)."""
+    panel = JudgePanel(
+        judges=[
+            make_raising_judge("qwen", RuntimeError("down")),
+            make_raising_judge("mistral", RuntimeError("also down")),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    with pytest.raises(ValueError, match="no .*judges|empty"):
+        asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_median_degrades_over_survivors(
+    scoring_attempt: AttemptState,
+) -> None:
+    """A numeric panel with one raising judge still reduces over the surviving
+    finite votes (the median is taken over survivors, not poisoned to a crash)."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("qwen", 0.3),
+            make_raising_judge("mistral", RuntimeError("timeout")),
+            make_judge("cohere", 0.9),
+        ],
+        reducer="median",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # median of the two survivors {0.3, 0.9} -> 0.6
+    assert result.value == pytest.approx(0.6)
+    assert len(result.metadata["judges_errored"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — median reducer must not return an order-dependent NaN
+# (scoring-numerics-002)
+# --------------------------------------------------------------------------- #
+
+
+def test_reduce_median_drops_non_finite_judge_value() -> None:
+    """scoring-numerics-002 (RED→GREEN): a judge returning NaN must NOT silently
+    poison the panel median (``statistics.median`` over a list containing NaN
+    yields an order-dependent NaN). The reducer drops the non-finite vote and
+    reduces over the finite peers, flagging the drop in metadata."""
+    out = reduce_scores(
+        [
+            Score(value=0.4),
+            Score(value=float("nan")),
+            Score(value=0.8),
+        ],
+        "median",
+    )
+    import math
+
+    assert math.isfinite(out.value)  # type: ignore[arg-type]
+    # median over the finite survivors {0.4, 0.8} -> 0.6
+    assert out.value == pytest.approx(0.6)
+    # the dropped non-finite votes are flagged, not silently swallowed
+    assert out.metadata["non_finite_dropped"] == 1
+
+
+def test_reduce_median_inf_is_dropped() -> None:
+    """An infinite judge value is non-finite too — dropped before the median."""
+    out = reduce_scores(
+        [Score(value=0.5), Score(value=float("inf")), Score(value=0.7)],
+        "median",
+    )
+    import math
+
+    assert math.isfinite(out.value)  # type: ignore[arg-type]
+    assert out.value == pytest.approx(0.6)
+    assert out.metadata["non_finite_dropped"] == 1
+
+
+def test_reduce_median_all_non_finite_raises() -> None:
+    """If EVERY judge value is non-finite there is no finite estimate to report —
+    fail with a clear reason rather than returning a silent NaN."""
+    with pytest.raises(ValueError, match="non-finite|finite"):
+        reduce_scores([Score(value=float("nan")), Score(value=float("inf"))], "median")
+
+
+# --------------------------------------------------------------------------- #
+# oracle — grade() must reject a non-finite solve_quality / time_used
+# (scoring-numerics-003, eval-integrity-adjacent)
+# --------------------------------------------------------------------------- #
+
+
+def test_grade_rejects_nan_solve_quality(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-numerics-003 (RED→GREEN): a NaN ``solve_quality`` currently passes
+    every threshold comparison (``nan < 50`` is False) and emits a non-finite
+    ``Score.value`` with NO failed condition. The gate must close with a
+    ``non_finite_input`` condition and value 0.0 — a NaN never opens the gate."""
+    import math
+
+    outcome = _clean_outcome(solve_quality=float("nan"))
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "non_finite_input" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+    assert math.isfinite(score.value)  # type: ignore[arg-type]
+
+
+def test_grade_rejects_inf_time_used(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-numerics-003: an infinite ``time_used`` is non-finite too — the gate
+    closes with ``non_finite_input`` (and ``over_time_budget`` may also fire; the
+    point is the gate is CLOSED and the value is a finite 0.0)."""
+    outcome = _clean_outcome(time_used=float("inf"))
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "non_finite_input" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+
+
+def test_grade_finite_inputs_have_no_non_finite_condition(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """A normal (finite) clean solve must NOT spuriously carry non_finite_input."""
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome())
+    assert "non_finite_input" not in score.metadata["failed_conditions"]

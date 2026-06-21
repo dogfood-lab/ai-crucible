@@ -130,10 +130,27 @@ def _to_num(choice: str | None) -> int:
     return 1 if choice in ("PASS", "A") else 0
 
 
+#: Per-item wall-clock budget around a single ``judge_item`` call (characterize-degradation-005).
+#: A single hung Ollama call (transient daemon stall during a model swap) must not stall the
+#: whole expensive run; this caps it well under the adapter's transport-level 600s. PIN_PER_STEP:
+#: the effective budget is stamped into each record's ``metadata["per_item_timeout_s"]``.
+_PER_ITEM_TIMEOUT_S = 180.0
+
+#: After this many CONSECUTIVE per-item failures, ``collect_records`` stops salvaging and
+#: re-raises (characterize-degradation-002): a sustained run of failures genuinely signals the
+#: daemon is down / the tag is unservable, so the whole-model drop in :func:`run_panel` is the
+#: correct outcome — burning the full item set against a dead daemon is not graceful, it is slow.
+_MAX_CONSECUTIVE_ITEM_FAILURES = 3
+
+
 async def collect_records(
-    model: OllamaModel, items: list[CalibrationItem], *, k: int = 3
-) -> list[JudgmentRecord]:
-    """Run one model over the calibration items (k reruns), returning graded records.
+    model: OllamaModel,
+    items: list[CalibrationItem],
+    *,
+    k: int = 3,
+    per_item_timeout: float | None = _PER_ITEM_TIMEOUT_S,
+) -> tuple[list[JudgmentRecord], dict[str, Any]]:
+    """Run one model over the calibration items (k reruns), returning graded records + stats.
 
     Each record is stamped with the **authored** ``item.id`` (NOT the adapter's
     prompt-hash fallback) so every grouping metric — known-groups, consistency,
@@ -141,13 +158,54 @@ async def collect_records(
     authored set. ``predicted``/``gold`` are mapped to 0/1, ``correct`` is the
     exact-match on the parsed token, and ``metadata`` carries the category + the
     item difficulty (the §12 difficulty weighting) + the raw parsed token.
+
+    Graceful degradation (characterize-degradation-002/004/005):
+
+    * **Per-item salvage** — a single ``judge_item`` raise (or per-item timeout) drops only
+      THAT item, not the whole model: a partial profile on 17/20 items (a slightly wider
+      Wilson CI) is strictly better than dropping the model. Dropped items are counted +
+      named in the returned stats. A *sustained* run of ≥:data:`_MAX_CONSECUTIVE_ITEM_FAILURES`
+      consecutive failures re-raises (the daemon is down — let :func:`run_panel` drop the model).
+    * **Per-item timeout** — each call is bounded by ``per_item_timeout`` (``None`` disables it,
+      e.g. for the offline tests). A hung call is treated as a dropped item, not a hang.
+    * **Parse-failure accounting** — an unparseable output is still scored *incorrect*
+      (conservative default), but it is also COUNTED (``stats["n_unparsed"]``) and the record is
+      flagged ``metadata["parse_failure"] = True`` so a format break is diagnosable rather than
+      silently depressing accuracy as if the judge were merely weak.
+
+    Returns ``(records, stats)`` where ``stats`` carries ``dropped_items`` /
+    ``dropped_item_ids`` / ``n_unparsed`` for the report (honesty-only: attempted vs measured).
     """
     records: list[JudgmentRecord] = []
+    dropped_item_ids: list[str] = []
+    n_unparsed = 0
+    consecutive_failures = 0
     for item in items:
         gold_str = str(item.gold).upper()
         gold_num = _to_num(gold_str)
+        item_failed = False
         for ri in range(k):
-            rec = await model.judge_item(item.prompt, run_index=ri)
+            try:
+                if per_item_timeout is not None:
+                    rec = await asyncio.wait_for(
+                        model.judge_item(item.prompt, run_index=ri), timeout=per_item_timeout
+                    )
+                else:
+                    rec = await model.judge_item(item.prompt, run_index=ri)
+            except Exception as exc:  # noqa: BLE001 — any per-item fault is salvaged below
+                # Per-item salvage: drop only this item's reruns; keep the rest of the model.
+                # asyncio.wait_for raises TimeoutError (==asyncio.TimeoutError since 3.11), a
+                # subclass of Exception, so this single handler covers the hung-call case too.
+                consecutive_failures += 1
+                reason = "timeout" if isinstance(exc, TimeoutError) else repr(exc)
+                dropped_item_ids.append(f"{item.id} ({reason})")
+                print(f"[{model.model_id}] item {item.id} dropped (run {ri}): {reason}")
+                item_failed = True
+                if consecutive_failures >= _MAX_CONSECUTIVE_ITEM_FAILURES:
+                    # Sustained failure → daemon-down signal: let run_panel drop the whole model.
+                    raise
+                break  # skip remaining reruns of this item; move on
+            consecutive_failures = 0  # a success breaks the consecutive-failure streak
             rec.item_id = item.id  # authored id, not the prompt-hash fallback (§11.3)
             parsed = parse_choice(str(rec.predicted), gold_str)
             pred_num = _to_num(parsed) if parsed is not None else (1 - gold_num)
@@ -156,10 +214,24 @@ async def collect_records(
             rec.correct = parsed == gold_str
             rec.metadata["category"] = item.category.value
             rec.metadata["raw_choice"] = parsed
+            # characterize-degradation-004: an unparseable output is scored wrong (conservative)
+            # but flagged + counted so a format break is distinct from a genuinely-weak judge.
+            rec.metadata["parse_failure"] = parsed is None
+            if parsed is None:
+                n_unparsed += 1
             if item.difficulty is not None:
                 rec.metadata["difficulty"] = item.difficulty
+            if per_item_timeout is not None:
+                rec.metadata["per_item_timeout_s"] = per_item_timeout  # PIN_PER_STEP
             records.append(rec)
-    return records
+        if item_failed:
+            continue
+    stats = {
+        "dropped_items": len(dropped_item_ids),
+        "dropped_item_ids": dropped_item_ids,
+        "n_unparsed": n_unparsed,
+    }
+    return records, stats
 
 
 def _evict(model_id: str) -> None:
@@ -201,12 +273,20 @@ async def run_panel(
     *,
     k: int = 3,
     human_labels: HumanLabels | None = None,
-) -> tuple[dict[str, JudgeProfile], dict[str, list[JudgmentRecord]]]:
+) -> tuple[dict[str, JudgeProfile], dict[str, list[JudgmentRecord]], list[dict[str, Any]]]:
     """Sequential load → judge → evict, then profile with the alt-test (§11.2/§12).
 
     Two passes: (1) judge the whole panel one model at a time (VRAM-respecting —
     ``OLLAMA_NUM_PARALLEL=1``, evict between models); (2) build each model's profile.
     Pass 2 needs the full record set first, which is why profiling is deferred.
+
+    Returns ``(profiles, all_records, failed)``. ``failed`` is the
+    characterize-degradation-001 honesty signal: a model that fails mid-run must NOT vanish
+    from the report — it is captured as ``{"model_id", "family", "error", "n_records_lost"}``
+    so a thinned panel (one OOM / one unservable tag — the common partial-failure case) is
+    distinguishable from a smaller-by-design one. Per-item salvage (characterize-degradation-002)
+    means a model with a few dropped items still seats with a partial profile; only a
+    daemon-down-level failure lands a model in ``failed``.
 
     The alt-test reference (pass 2) is chosen by ``human_labels``:
 
@@ -222,20 +302,60 @@ async def run_panel(
 
     all_records: dict[str, list[JudgmentRecord]] = {}
     quant_by_id: dict[str, str | None] = {}
+    stats_by_id: dict[str, dict[str, Any]] = {}
+    failed: list[dict[str, Any]] = []
     for model_id, family, quant in panel:
         quant_by_id[model_id] = quant
         model = OllamaModel(model_id=model_id, family=family, quant=quant)
         t0 = time.monotonic()
         try:
-            recs = await collect_records(model, items, k=k)
+            recs, stats = await collect_records(model, items, k=k)
         except Exception as exc:  # noqa: BLE001 — one bad model must not sink the panel
+            # characterize-degradation-001: do NOT let the failure vanish into stdout alone —
+            # capture it (id + reason) so the report can list the model + flag the run degraded.
             print(f"[{model_id}] ERROR: {exc!r}")
+            failed.append(
+                {
+                    "model_id": model_id,
+                    "family": family,
+                    "error": repr(exc),
+                    "n_records_lost": 0,
+                }
+            )
             _evict(model_id)
             continue
         elapsed = time.monotonic() - t0
+        if not recs:
+            # characterize-degradation-001/002: every item was salvaged-away (dropped/timed out)
+            # WITHOUT tripping the consecutive-failure ceiling — e.g. an item-set shorter than the
+            # ceiling, or alternating failures. Zero records is not a profileable model and would
+            # crash the profiler downstream; treat it as a full failure so it lands in `failed`
+            # (surfaced + degraded), not in all_records as an empty, un-profileable set.
+            print(f"[{model_id}] no records salvaged ({stats.get('dropped_items', 0)} dropped)")
+            failed.append(
+                {
+                    "model_id": model_id,
+                    "family": family,
+                    "error": (
+                        f"no records salvaged ({stats.get('dropped_items', 0)} item(s) dropped: "
+                        f"{stats.get('dropped_item_ids', [])})"
+                    ),
+                    "n_records_lost": stats.get("dropped_items", 0),
+                }
+            )
+            _evict(model_id)
+            continue
         all_records[model_id] = recs
+        stats_by_id[model_id] = stats
         acc = sum(1 for r in recs if r.correct) / len(recs) if recs else 0.0
-        print(f"[{model_id}] judged {len(recs)} records  acc={acc:.3f}  ({elapsed:.0f}s)")
+        # characterize-degradation-004: surface the unparseable count next to acc so a format
+        # break is visible at a glance, not hidden inside a depressed accuracy.
+        unparsed = stats.get("n_unparsed", 0)
+        dropped = stats.get("dropped_items", 0)
+        print(
+            f"[{model_id}] judged {len(recs)} records  acc={acc:.3f}  "
+            f"unparsed={unparsed}  dropped_items={dropped}  ({elapsed:.0f}s)"
+        )
         _evict(model_id)
 
     disputed = set(human_labels.disputed) if human_labels else None
@@ -265,6 +385,26 @@ async def run_panel(
                 records_per_annotator=_jury(all_records, model_id, recs),
                 quant=quant_by_id.get(model_id),
             )
+        # characterize-degradation-004 / -002: make the unparseable rate + salvaged-item count
+        # first-class, report-visible profile fields so a REJECT driven by a format break (high
+        # unparsed rate) is diagnosable, and a partial profile (items dropped) is flagged as such
+        # rather than read as a confident full-set measurement.
+        stats = stats_by_id.get(model_id, {})
+        n_total = len(recs)
+        n_unparsed = stats.get("n_unparsed", 0)
+        profile.metadata["n_unparsed"] = n_unparsed
+        profile.metadata["parse_failure_rate"] = round(n_unparsed / n_total, 4) if n_total else 0.0
+        profile.metadata["dropped_items"] = stats.get("dropped_items", 0)
+        if stats.get("dropped_items", 0):
+            profile.notes.append(
+                f"[degraded] profiled on a PARTIAL item set — {stats['dropped_items']} item(s) "
+                f"dropped: {stats.get('dropped_item_ids', [])}"
+            )
+        if n_total and n_unparsed / n_total >= 0.10:
+            profile.notes.append(
+                f"[warning] {n_unparsed}/{n_total} outputs were UNPARSEABLE and scored as "
+                "incorrect — check the prompt format before trusting this decision"
+            )
         profiles[model_id] = profile
         flag = " [review]" if profile.metadata.get("review_flag") else ""
         q = profile.metadata.get("quality_score")
@@ -272,7 +412,7 @@ async def run_panel(
             f"[{model_id}] {profile.seat_decision.value}{flag}  acc={profile.objective_accuracy}  "
             f"q={q}  ece={profile.ece}  omega={profile.alt_test_omega}"
         )
-    return profiles, all_records
+    return profiles, all_records, failed
 
 
 def known_groups_report(
@@ -455,12 +595,22 @@ def main(argv: list[str] | None = None) -> int:
     panel = _parse_models(args.models) if args.models else DEFAULT_PANEL
     human_labels = load_human_labels(args.human_labels, items) if args.human_labels else None
 
-    profiles, records = asyncio.run(run_panel(panel, items, k=args.k, human_labels=human_labels))
+    profiles, records, failed = asyncio.run(
+        run_panel(panel, items, k=args.k, human_labels=human_labels)
+    )
 
     report = {
         "n_items": len(items),
         "k": args.k,
         "item_set": args.items.name if args.items else "admission_pairs.json",
+        # characterize-degradation-001: a model that failed mid-run must NOT vanish — list the
+        # requested panel + the failures (id + reason) and flag the run `degraded` so a thinned
+        # panel is distinguishable from a smaller-by-design one. Honesty-only: surfacing what was
+        # attempted vs measured, no fabricated data. ANDON_AUTHORITY: `degraded` is the signal a
+        # downstream gate can halt on rather than consuming a quietly-thinned panel as full.
+        "attempted_panel": [m for m, _f, _q in panel],
+        "failed_models": failed,
+        "degraded": bool(failed),
         "alt_test_reference": "human" if human_labels else "model-jury-bootstrap",
         "alt_test_caveat": _alt_test_human_note(human_labels) if human_labels else _ALT_TEST_CAVEAT,
         # characterize-002: the κ one-sided floor + κ-z gate run against a human–human κ

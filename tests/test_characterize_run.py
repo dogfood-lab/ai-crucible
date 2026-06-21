@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from ai_crucible.calibration.types import CalibrationCategory, CalibrationItem
 from ai_crucible.characterize.run import (
     _grade_matrix,
     _jury,
     _parse_models,
     _to_num,
+    collect_records,
     irt_prune_report,
     known_groups_report,
     main,
@@ -15,8 +20,51 @@ from ai_crucible.characterize.run import (
     panel_correlation_report,
     parse_choice,
     parse_verdict,
+    run_panel,
 )
 from ai_crucible.characterize.types import JudgeProfile, JudgmentRecord, RoleSlot, SeatDecision
+
+
+def _item(item_id: str, gold: str = "A") -> CalibrationItem:
+    """A minimal A/B calibration item for the collect_records / run_panel paths."""
+    return CalibrationItem(
+        id=item_id,
+        category=CalibrationCategory.KNOWN_DIAGNOSTIC,
+        construct="x",
+        confound_controlled="y",
+        prompt=f"prompt for {item_id} — choose A or B",
+        gold=gold,
+    )
+
+
+class _StubModel:
+    """A fake :class:`OllamaModel` for collect_records: each call returns a record whose
+    ``predicted`` is taken from ``replies`` (keyed by item prompt), or raises if the reply
+    is an Exception. Exposes the ``model_id``/``family``/``quant`` collect_records reads."""
+
+    def __init__(self, model_id: str, replies: dict[str, object], *, hang_prompts=None):
+        self.model_id = model_id
+        self.family = "fam"
+        self.quant = None
+        self._replies = replies
+        self._hang_prompts = set(hang_prompts or [])
+
+    async def judge_item(self, prompt: str, *, run_index: int = 0, position=None):
+        if prompt in self._hang_prompts:
+            # Simulate a hung Ollama call: sleep far past any sane per-item budget.
+            await asyncio.sleep(3600)
+        reply = self._replies.get(prompt, "A")
+        if isinstance(reply, Exception):
+            raise reply
+        return JudgmentRecord(
+            item_id="adapter-fallback",  # collect_records overwrites with authored id
+            model_id=self.model_id,
+            predicted=reply,
+            gold=None,
+            run_index=run_index,
+            position=position,
+            family=self.family,
+        )
 
 
 def _rec(item_id: str, model_id: str, *, correct: bool, gold: int = 1) -> JudgmentRecord:
@@ -254,8 +302,8 @@ def test_main_exits_nonzero_when_every_model_fails(tmp_path, monkeypatch, capsys
     not treat empty profiles as success (silent data loss presented as green)."""
 
     async def _empty_panel(*_a, **_k):
-        # both profiles and all_records empty — the total-failure path.
-        return {}, {}
+        # profiles, all_records, failed — the total-failure path (every model in `failed`).
+        return {}, {}, [{"model_id": "m", "family": "fam", "error": "down", "n_records_lost": 0}]
 
     monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _empty_panel)
     out_path = tmp_path / "report.json"
@@ -276,7 +324,7 @@ def test_main_exits_zero_on_a_real_profile(tmp_path, monkeypatch) -> None:
     records = {"m": [_rec(f"i{j}", "m", correct=True) for j in range(4)]}
 
     async def _one_panel(*_a, **_k):
-        return {"m": prof}, records
+        return {"m": prof}, records, []
 
     monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _one_panel)
     out_path = tmp_path / "report.json"
@@ -303,7 +351,7 @@ def test_default_report_marks_kappa_baseline_provisional(tmp_path, monkeypatch) 
     records = {"m": [_rec(f"i{j}", "m", correct=True) for j in range(4)]}
 
     async def _one_panel(*_a, **_k):
-        return {"m": prof}, records
+        return {"m": prof}, records, []
 
     monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _one_panel)
     out_path = tmp_path / "report.json"
@@ -318,3 +366,176 @@ def test_default_report_marks_kappa_baseline_provisional(tmp_path, monkeypatch) 
     assert kb["value"] == 0.80
     # the source string must make the fabrication explicit (not human-estimated).
     assert "human" in kb["source"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# characterize-degradation-002 — collect_records salvages completed items
+#                                instead of discarding the whole transcript
+# --------------------------------------------------------------------------- #
+
+
+def test_collect_records_salvages_items_on_single_item_failure() -> None:
+    """characterize-degradation-002: a single judge_item raise must NOT discard the model's
+    whole transcript. The other items' records survive (a partial profile is strictly better
+    than a dropped model), and the dropped item is counted + named in the returned stats."""
+    items = [_item("i1"), _item("i2"), _item("i3")]
+    replies = {
+        items[0].prompt: "A",
+        items[1].prompt: RuntimeError("boom on i2"),
+        items[2].prompt: "B",
+    }
+    model = _StubModel("m", replies)
+    records, stats = asyncio.run(collect_records(model, items, k=1))
+    # i2 raised; i1 and i3 survive (RED: current code unwinds the whole model on the raise).
+    survived = {r.item_id for r in records}
+    assert "i1" in survived
+    assert "i3" in survived
+    assert "i2" not in survived
+    assert stats["dropped_items"] == 1
+    assert any("i2" in str(d) for d in stats["dropped_item_ids"])
+
+
+def test_collect_records_aborts_on_consecutive_failures() -> None:
+    """A run of consecutive failures genuinely signals the daemon is down — collect_records
+    bounds it: after N consecutive item failures it raises (the whole-model drop in run_panel
+    is then the correct outcome), rather than burning the full item set against a dead daemon."""
+    items = [_item(f"i{n}") for n in range(8)]
+    # every item raises → consecutive-failure ceiling trips → propagate (daemon-down signal).
+    replies = {it.prompt: RuntimeError(f"down {it.id}") for it in items}
+    model = _StubModel("m", replies)
+    with pytest.raises(RuntimeError):
+        asyncio.run(collect_records(model, items, k=1))
+
+
+# --------------------------------------------------------------------------- #
+# characterize-degradation-004 — per-item parse failures are counted + surfaced,
+#                                not silently scored as wrong
+# --------------------------------------------------------------------------- #
+
+
+def test_collect_records_counts_unparseable_outputs() -> None:
+    """characterize-degradation-004: an output that does not parse to a verdict is still
+    scored as wrong (conservative default), but the unparseable COUNT must be a first-class
+    signal so a format break is diagnosable rather than silently depressing accuracy."""
+    items = [_item("i1", gold="A"), _item("i2", gold="A")]
+    replies = {
+        items[0].prompt: "A",  # parses fine
+        items[1].prompt: "I cannot decide between the options",  # no standalone A/B → unparseable
+    }
+    model = _StubModel("m", replies)
+    records, stats = asyncio.run(collect_records(model, items, k=1))
+    # both records exist; the unparsed one was scored incorrect AND counted as a parse failure.
+    assert stats["n_unparsed"] == 1
+    unparsed_rec = next(r for r in records if r.item_id == "i2")
+    assert unparsed_rec.correct is False
+    # distinct from a *wrong* answer: the record is flagged as a parse failure.
+    assert unparsed_rec.metadata.get("parse_failure") is True
+    assert unparsed_rec.metadata.get("raw_choice") is None
+    parsed_rec = next(r for r in records if r.item_id == "i1")
+    assert parsed_rec.metadata.get("parse_failure") is False
+
+
+# --------------------------------------------------------------------------- #
+# characterize-degradation-005 — bounded per-item timeout around judge_item
+# --------------------------------------------------------------------------- #
+
+
+def test_collect_records_bounds_a_hung_judge_item() -> None:
+    """characterize-degradation-005: a single hung Ollama call must NOT stall the whole run.
+    A per-item timeout bounds it; the hung item is dropped (counted, not crash) and the run
+    continues over the remaining items."""
+    items = [_item("i1"), _item("hang"), _item("i3")]
+    replies = {items[0].prompt: "A", items[2].prompt: "B"}
+    model = _StubModel("m", replies, hang_prompts=[items[1].prompt])
+    # tiny per-item budget so the test does not actually wait; RED: current code awaits with
+    # no wait_for, so this hangs forever (no timeout kwarg even exists yet).
+    records, stats = asyncio.run(collect_records(model, items, k=1, per_item_timeout=0.05))
+    survived = {r.item_id for r in records}
+    assert "i1" in survived and "i3" in survived
+    assert "hang" not in survived
+    assert stats["dropped_items"] >= 1
+    assert any("hang" in str(d) for d in stats["dropped_item_ids"])
+
+
+# --------------------------------------------------------------------------- #
+# characterize-degradation-001 — failed models are surfaced + the run is flagged
+#                                degraded (not silently absent from the report)
+# --------------------------------------------------------------------------- #
+
+
+def test_run_panel_surfaces_failed_models(monkeypatch) -> None:
+    """characterize-degradation-001: a model that fails mid-run must NOT vanish. run_panel
+    returns the failed models (id + reason) alongside profiles/records so a partial panel is
+    distinguishable from a smaller-by-design one."""
+
+    good_items = [_item("i1"), _item("i2")]
+
+    def _fake_model(*, model_id, family, quant):
+        if model_id == "bad":
+            return _StubModel(model_id, {it.prompt: RuntimeError("OOM") for it in good_items})
+        return _StubModel(model_id, {it.prompt: "A" for it in good_items})
+
+    monkeypatch.setattr("ai_crucible.characterize.run.OllamaModel", _fake_model)
+    monkeypatch.setattr("ai_crucible.characterize.run._evict", lambda *_a, **_k: None)
+
+    panel = [("good1", "fam", None), ("bad", "fam", None), ("good2", "fam", None)]
+    profiles, records, failed = asyncio.run(run_panel(panel, good_items, k=1))
+    # the two good models judged; the bad model is NOT in records/profiles...
+    assert set(records) == {"good1", "good2"}
+    assert "bad" not in profiles
+    # ...but it is SURFACED in `failed` with an id + reason (RED: run_panel returns only a
+    # 2-tuple today and the failed model leaves no machine-readable trace).
+    assert any(f["model_id"] == "bad" for f in failed)
+    bad = next(f for f in failed if f["model_id"] == "bad")
+    assert "OOM" in bad["error"]
+
+
+def test_main_report_flags_degraded_and_lists_failed_models(tmp_path, monkeypatch) -> None:
+    """characterize-degradation-001 (report side): when run_panel reports a failed model the
+    emitted report must (a) list it under `failed_models`, (b) record the `attempted_panel`,
+    and (c) flag the run `degraded` — so a consumer can tell a thinned panel from a
+    thin-by-design one. The non-degraded happy path must NOT carry the degraded flag."""
+    prof = JudgeProfile(
+        model_id="good1", role=RoleSlot.JUDGE, n_items=2,
+        reliability_weight=1.0, seat_decision=SeatDecision.SEAT, metadata={},
+    )
+    records = {"good1": [_rec(f"i{j}", "good1", correct=True) for j in range(2)]}
+    failed = [{"model_id": "bad", "family": "fam", "error": "RuntimeError('OOM')",
+               "n_records_lost": 0}]
+
+    async def _degraded_panel(*_a, **_k):
+        return {"good1": prof}, records, failed
+
+    monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _degraded_panel)
+    out_path = tmp_path / "report.json"
+    # --models supplies the attempted panel argparse records (run_panel itself is stubbed):
+    # "bad" must appear in attempted_panel even though it produced no records.
+    assert main(["--out", str(out_path), "--models", "good1@fam", "bad@fam"]) == 0
+    import json
+
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["degraded"] is True
+    assert any(f["model_id"] == "bad" for f in report["failed_models"])
+    assert "bad" in report["attempted_panel"]
+
+
+def test_main_report_not_degraded_on_clean_run(tmp_path, monkeypatch) -> None:
+    """Contrast: a clean run (no failed models) must report degraded=False and an empty
+    failed_models list — the degraded flag is earned by an actual failure, never default-on."""
+    prof = JudgeProfile(
+        model_id="m", role=RoleSlot.JUDGE, n_items=2,
+        reliability_weight=1.0, seat_decision=SeatDecision.SEAT, metadata={},
+    )
+    records = {"m": [_rec(f"i{j}", "m", correct=True) for j in range(2)]}
+
+    async def _clean_panel(*_a, **_k):
+        return {"m": prof}, records, []
+
+    monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _clean_panel)
+    out_path = tmp_path / "report.json"
+    assert main(["--out", str(out_path)]) == 0
+    import json
+
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["degraded"] is False
+    assert report["failed_models"] == []
