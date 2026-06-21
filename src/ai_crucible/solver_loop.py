@@ -78,6 +78,14 @@ from typing import Any, Protocol
 from ai_crucible.roles import GenerateFn, Solver
 from ai_crucible.types import AttemptState
 
+#: The opening of any Harmony chat-template control token (``<|message|>``, ``<|end|>``,
+#: ``<|channel|>`` …). A gpt-oss model served through a path that does not parse its
+#: Harmony template leaks these into the text; the adapter normalizes them away
+#: (:func:`ai_crucible.models.ollama_adapter._normalize_harmony`), but the parser cuts at
+#: the first occurrence too (defense in depth) so ANY residual token can never glue a
+#: second action onto the first or trail garbage onto a clean marker/answer.
+_CONTROL_TOKEN = "<|"
+
 __all__ = ["ChatModel", "DEFAULT_TOOL_INSTRUCTION", "build_solver_generate"]
 
 #: Key the kernel parks the live :class:`~ai_crucible.roles.Solver` under on
@@ -274,9 +282,18 @@ def _parse_action(text: str) -> tuple[str, Any] | None:
     Each line carries at most one marker; across lines the FIRST recognized marker
     (scanning top to bottom) wins, so a model that reasons in prose first and emits its
     action/answer on a later line still parses.
+
+    Harmony hardening (defense in depth): each line is cut at the first ``<|`` control
+    token before parsing, so a gpt-oss leak that glues a SECOND action onto the first
+    (``ACTION read_file p<|message|>ACTION exec ls<|end|>``) or trails garbage onto a
+    clean marker (``FINAL 7<|end|>…``) yields only the FIRST clean marker — never a
+    multi-action command stuffed with leaked tokens. A line that is *only* a control
+    token cuts to empty and is skipped, so a marker on a LATER clean line still parses.
     """
     for raw in text.splitlines():
-        line = raw.strip()
+        # Cut at the first control token (defense in depth — the adapter normalizes too).
+        cut = raw.split(_CONTROL_TOKEN, 1)[0]
+        line = cut.strip()
         if not line:
             continue
         upper = line.upper()

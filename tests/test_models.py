@@ -42,6 +42,7 @@ from ai_crucible.models.ollama_adapter import (
     _call_with_retry,
     _is_transient,
     _norm_model,
+    _normalize_harmony,
     _normalize_sdk_response,
 )
 from ai_crucible.scoring.judge_panel import JudgePanel, judge_family
@@ -1044,3 +1045,120 @@ def test_claude_retry_policy_pinned_in_metadata() -> None:
     retry = model.pin_metadata()["retry"]
     assert retry["max_retries"] == 4
     assert retry["backoff_base"] == 0.25
+
+
+# --------------------------------------------------------------------------- #
+# Harmony control-token normalization (gpt-oss / Harmony chat-template leak).
+#
+# A gpt-oss model served via a path that does NOT strip its Harmony chat template
+# leaks control tokens into ``message.content`` — ``<|channel|>analysis<|message|>``
+# (hidden CoT), ``<|channel|>final<|message|>...<|end|>`` (the real answer), stray
+# ``<|start|>``/``<|end|>``/``<|return|>``. The ReAct parser downstream then grabs
+# garbage. ``complete()`` must surface the FINAL-channel message when the channel
+# structure is present, else strip stray ``<|...|>`` control tokens — and leave a
+# CLEAN response (no control tokens) byte-for-byte UNCHANGED (no over-stripping).
+# Every client is faked; no network call (build-law 3).
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_harmony_extracts_final_channel() -> None:
+    """The FINAL channel content is extracted; the analysis (CoT) channel is dropped."""
+    raw = (
+        "<|channel|>analysis<|message|>The user wants 3+4. That is 7.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>7<|end|>"
+    )
+    assert _normalize_harmony(raw) == "7"
+
+
+def test_normalize_harmony_final_channel_terminated_by_return() -> None:
+    """A final message terminated by ``<|return|>`` (not ``<|end|>``) is handled."""
+    raw = (
+        "<|channel|>analysis<|message|>thinking out loud<|end|>"
+        "<|channel|>final<|message|>ACTION read_file config/limits.py<|return|>"
+    )
+    assert _normalize_harmony(raw) == "ACTION read_file config/limits.py"
+
+
+def test_normalize_harmony_strips_stray_control_tokens() -> None:
+    """With no channel structure, stray ``<|...|>`` control tokens are stripped out."""
+    raw = "<|start|>assistant<|message|>FINAL 7<|end|>"
+    assert _normalize_harmony(raw) == "FINAL 7"
+
+
+def test_normalize_harmony_clean_text_unchanged() -> None:
+    """A clean response (no control tokens) passes through byte-for-byte (no stripping)."""
+    clean = "ACTION read_file config/limits.py"
+    assert _normalize_harmony(clean) is clean
+    multiline = "I should read the file.\nACTION read_file config/limits.py"
+    assert _normalize_harmony(multiline) is multiline
+
+
+def test_normalize_harmony_empty_and_whitespace_unchanged() -> None:
+    """Empty / whitespace text has no control tokens → returned unchanged."""
+    assert _normalize_harmony("") == ""
+    assert _normalize_harmony("   ") == "   "
+
+
+class FakeHarmonyClient:
+    """An Ollama ``/api/chat`` fake whose ``message.content`` leaks Harmony tokens.
+
+    Models the observed gpt-oss serving-path defect: the Harmony chat template was not
+    parsed away, so analysis + final channels and stray control tokens land verbatim in
+    ``content``. The adapter's :meth:`OllamaModel.complete` must normalize this to the
+    final-channel message before the ReAct parser ever sees it.
+    """
+
+    def __init__(self, content: str, served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        resp: dict[str, Any] = {
+            "message": {"role": "assistant", "content": self.content}
+        }
+        if self.served is not None:
+            resp["model"] = self.served
+        return resp
+
+
+def test_ollama_complete_normalizes_harmony_leak(attempt: AttemptState) -> None:
+    """complete() returns the clean final-channel content, no ``<|`` tokens (the fix).
+
+    RED against the current adapter (which returns the raw leaked content verbatim);
+    GREEN once complete() routes the extracted text through :func:`_normalize_harmony`.
+    """
+    leaked = (
+        "<|channel|>analysis<|message|>User wants just the number. 3+4 = 7.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>7<|end|>"
+    )
+    client = FakeHarmonyClient(leaked)
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    out = asyncio.run(model.complete(attempt.messages))
+
+    assert out == "7"
+    assert "<|" not in out
+
+
+def test_ollama_complete_clean_response_passes_through(attempt: AttemptState) -> None:
+    """A clean (control-token-free) response is returned verbatim — no over-stripping."""
+    client = FakeHarmonyClient("ACTION read_file config/limits.py")
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    out = asyncio.run(model.complete(attempt.messages))
+
+    assert out == "ACTION read_file config/limits.py"
+
+
+def test_ollama_judge_item_normalizes_harmony_leak() -> None:
+    """The characterization path also gets the cleaned prediction (one normalize seam)."""
+    leaked = "<|channel|>final<|message|>PASS<|end|>"
+    client = FakeHarmonyClient(leaked)
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    record = asyncio.run(model.judge_item("grade: PASS or FAIL"))
+
+    assert record.predicted == "PASS"
+    assert "<|" not in record.predicted

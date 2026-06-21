@@ -445,3 +445,75 @@ def test_unrecognized_action_verb_keeps_scanning_for_final() -> None:
     assert answer == "7"
     # No tool call was recorded (the unknown verb produced no action).
     assert _tool_events(state) == []
+
+
+# --------------------------------------------------------------------------- #
+# Harmony control-token hardening (defense-in-depth, parser layer).
+#
+# Even after the adapter normalizes a gpt-oss Harmony leak, the parser must be robust
+# to ANY residual control token: it cuts the model text at the first ``<|`` control
+# token before parsing and takes the FIRST clean recognized ACTION/FINAL. A turn that
+# concatenates multiple actions glued by Harmony tokens
+# (``ACTION read_file config/limits.py<|message|>ACTION exec ls<|end|>``) must yield
+# EXACTLY the first clean ACTION (read_file config/limits.py) — never a multi-action
+# command stuffed with leaked tokens.
+# --------------------------------------------------------------------------- #
+
+
+def test_control_token_polluted_turn_parses_only_first_action() -> None:
+    """A turn with control tokens gluing multiple actions parses ONLY the first clean one.
+
+    RED against the current parser (which feeds the whole polluted line to the tool, so
+    the recorded read path carries the leaked ``<|message|>ACTION exec ls<|end|>`` tail
+    and the exec is never cleanly issued); GREEN once the parser cuts at the first ``<|``
+    and takes the first recognized marker.
+    """
+    polluted = "ACTION read_file config/limits.py<|message|>ACTION exec ls<|end|>"
+    model = CannedModel([polluted, "FINAL 7"])
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+
+    answer = anyio.run(build_solver_generate(model), state)
+
+    assert answer == "7"
+    # EXACTLY one tool call — the first clean read_file with a CLEAN path (no tokens).
+    tool_payloads = _tool_events(state)
+    assert tool_payloads == [
+        {"tool": "read_file", "args": {"path": "config/limits.py"}}
+    ]
+    # The exec smuggled in after the control token must NOT have been recorded.
+    assert all(p["tool"] != "exec" for p in tool_payloads)
+    # The sandbox saw the clean path, not a token-polluted one.
+    assert ("read_file", "config/limits.py") in tools.touches
+
+
+def test_control_token_polluted_final_parses_clean_answer() -> None:
+    """A FINAL whose answer is followed by a stray control token yields the clean answer."""
+    model = CannedModel(["FINAL 7<|end|><|start|>assistant<|message|>garbage"])
+    state = _make_state()
+    _park_solver(state, FakeSandboxTools())
+
+    answer = anyio.run(build_solver_generate(model), state)
+
+    assert answer == "7"
+
+
+def test_leading_control_token_then_action_parses_action() -> None:
+    """A turn that opens with a control token still parses a clean following ACTION.
+
+    Here the marker sits on a later line; cutting at the first ``<|`` must not discard a
+    marker that comes BEFORE any control token, and a leading control token before the
+    first marker is tolerated by stripping rather than dropping the whole turn.
+    """
+    model = CannedModel(
+        ["<|channel|>final<|message|>\nACTION read_file config/limits.py", "FINAL 7"]
+    )
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+
+    answer = anyio.run(build_solver_generate(model), state)
+
+    assert answer == "7"
+    assert ("read_file", "config/limits.py") in tools.touches

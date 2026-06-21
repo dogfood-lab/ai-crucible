@@ -115,13 +115,24 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
     2. ``outcome.no_regression`` is True (nothing required-to-still-work broke).
     3. ``outcome.solve_quality >= puzzle.point_threshold``.
     4. No triggered penalty is critical-flavor (``GoodhartFlavor.ADVERSARIAL``).
-    5. ``outcome.tool_calls_used <= puzzle.tool_call_budget``.
-    6. ``outcome.time_used <= puzzle.time_budget_seconds``.
-    7. If novelty is *claimed*, it must be *validated* by the panel; an unvalidated
+    5. The **penalty-adjusted solve** floor holds: ``solve_quality +
+       Σ(non-critical penalty weights) >= point_threshold``. A non-critical
+       (causal/regressional) penalty that drags this floor below the threshold
+       closes the gate — a right answer via the wrong/ungrounded process is not a
+       clean solve (Finding A). **Non-compensatory:** elegance/novelty bonuses are
+       NOT in the floor, so a bonus can never rescue a process-failed answer; and we
+       gate on this flavor-keyed floor, NOT on raw ``net``, to avoid the weighted-sum
+       Goodhart fragility §8.3 exists to avoid (Gordienko 2026; Alzahrani 2024).
+       Per-puzzle: a puzzle with no triggered non-critical penalty is never gated here.
+    6. ``outcome.tool_calls_used <= puzzle.tool_call_budget``.
+    7. ``outcome.time_used <= puzzle.time_budget_seconds``.
+    8. If novelty is *claimed*, it must be *validated* by the panel; an unvalidated
        novelty claim closes the gate (you don't get to assert your own bonus).
 
     **Net score (tiebreaker only, within the passing region):**
-    ``net = solve + elegance + novelty − penalties``, where:
+    ``net = solve + elegance + novelty − penalties``, where (note the bonus-bearing
+    ``net`` is the leaderboard tiebreaker; the *gate* uses the bonus-free
+    penalty-adjusted floor in condition 5, never ``net``):
 
     * ``solve`` = ``outcome.solve_quality``.
     * ``elegance`` = the §8.4 *ratio* form, scored only when the Solver beat the
@@ -160,6 +171,17 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
     triggered = _triggered_penalty_objects(outcome, index)
     unknown = [n for n in outcome.triggered_penalties if n not in index]
     has_critical = _has_critical_penalty(triggered)
+    # Penalty-adjusted-solve floor (§8.3 magnitude gate; Finding A). NON-critical
+    # penalties (causal/regressional) sum here; critical/ADVERSARIAL penalties are
+    # EXCLUDED — they already close the gate via ``critical_penalty`` below, so
+    # including them would double-count. NON-COMPENSATORY by design: the floor is
+    # ``solve_quality + non-critical penalties`` ONLY — elegance/novelty bonuses do
+    # NOT enter it (they remain the within-passing-region tiebreaker in ``net``), so a
+    # bonus can never lift a process-failed answer back over the gate.
+    non_critical_penalty_total = sum(
+        p.weight for p in triggered if p.goodhart_flavor is not CRITICAL_FLAVOR
+    )
+    penalty_adjusted_solve = float(outcome.solve_quality) + non_critical_penalty_total
 
     # ---- Conjunctive hard gate: collect every violated condition (§8.3). ----
     failed: list[str] = []
@@ -181,6 +203,18 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
         failed.append("below_point_threshold")
     if has_critical:
         failed.append("critical_penalty")
+    # A non-critical penalty (causal/regressional — e.g. skip_grounded_read) that drags
+    # the penalty-adjusted solve below ``point_threshold`` CLOSES the gate: a right
+    # answer reached by the wrong / ungrounded process is not a clean solve (Finding A,
+    # director-decided + study-swarm-grounded — Lightman 2023 process supervision;
+    # Turpin 2023 unfaithful reasoning; Zhong 2025 ImpossibleBench; SWE-bench conjunctive
+    # gating). Flavor-keyed + magnitude, NOT a raw ``net < threshold`` test (which would
+    # re-import the weighted-sum Goodhart fragility §8.3 exists to avoid — Gordienko 2026
+    # "Beyond Arrow"; Alzahrani 2024). The ``< 0.0`` guard means a puzzle that declares
+    # no non-critical penalty (or triggers none) is NEVER process-gated — GAIA-style
+    # answer-only puzzles keep pure outcome grading.
+    if non_critical_penalty_total < 0.0 and penalty_adjusted_solve < puzzle.point_threshold:
+        failed.append("penalty_adjusted_below_threshold")
     if outcome.tool_calls_used > puzzle.tool_call_budget:
         failed.append("over_tool_budget")
     if outcome.time_used > puzzle.time_budget_seconds:
@@ -231,6 +265,10 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
         "novelty": novelty_component,
         "penalties": penalty_total,
         "net": net,
+        # The non-compensatory gate floor (Finding A): solve + non-critical penalties,
+        # WITHOUT bonuses. Rides in metadata so a closed gate is reviewable, not a bare
+        # zero (the EvilGenie discipline — keep the breakdown legible).
+        "penalty_adjusted_solve": penalty_adjusted_solve,
     }
 
     metadata: dict[str, object] = {

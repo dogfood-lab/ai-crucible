@@ -325,14 +325,94 @@ def test_gate_goes_red_on_critical_penalty_even_when_solved(
 def test_minor_penalty_alone_does_not_close_gate(
     scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
 ) -> None:
-    """A regressional (minor) penalty subtracts from net but does NOT close the
-    gate — only critical-flavor does (§8.2)."""
+    """A SMALL non-critical penalty subtracts from net but does NOT close the gate,
+    because it does not drag the penalty-adjusted solve below point_threshold
+    (80 − 10 = 70 ≥ 50). A non-critical penalty closes the gate only when it crosses
+    that floor (Finding A — see test_causal_penalty_below_floor_closes_gate); a
+    critical/ADVERSARIAL penalty closes it unconditionally (§8.2)."""
     outcome = _clean_outcome(triggered_penalties=["redundant_tool_calls"])
     score = grade(scoring_attempt, scoring_meta, outcome)
     assert score.metadata["gate_passed"] is True
     # net = 80 + 12 (elegance) + 0 - 10 = 82
     assert score.value == pytest.approx(82.0)
     assert score.metadata["components"]["penalties"] == pytest.approx(-10.0)
+    # penalty-adjusted floor (Finding A) stays above threshold -> no close.
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(70.0)
+    assert "penalty_adjusted_below_threshold" not in score.metadata["failed_conditions"]
+
+
+def _meta_with_causal_penalty(weight: float) -> PuzzleMeta:
+    """A puzzle declaring a CAUSAL skip_grounded_read penalty of ``weight`` (the
+    seed-sulzbach shape) for the penalty-adjusted-floor tests (Finding A)."""
+    return PuzzleMeta(
+        puzzle_id="score-causal",
+        created_at="2026-06-01T00:00:00Z",
+        capability_aspect="retrieval-grounding",
+        puzzle_class=PuzzleClass.MULTI_FILE_SEARCH,
+        point_threshold=50.0,
+        time_budget_seconds=600,
+        tool_call_budget=12,
+        rewards=Rewards(
+            solve=80.0, elegance_bonus_max=24.0, novelty_bonus_max=40.0, canonical_call_count=8
+        ),
+        penalties=[
+            Penalty(
+                name="skip_grounded_read",
+                goodhart_flavor=GoodhartFlavor.CAUSAL,
+                weight=weight,
+                trigger="reports a value without the grounded read",
+            )
+        ],
+    )
+
+
+def test_causal_penalty_below_floor_closes_gate(scoring_attempt: AttemptState) -> None:
+    """LOAD-BEARING (Finding A): a causal penalty (skip_grounded_read, −60) that drags
+    the penalty-adjusted solve (80 − 60 = 20) below point_threshold (50) CLOSES the
+    gate even on a SOLVED, correct attempt — a fabricated-but-correct answer is a
+    non-solve, not a discounted solve. Prove the gate goes RED."""
+    meta = _meta_with_causal_penalty(-60.0)
+    outcome = _clean_outcome(triggered_penalties=["skip_grounded_read"])
+    score = grade(scoring_attempt, meta, outcome)
+    assert outcome.solved is True  # the reported value WAS correct
+    assert score.metadata["gate_passed"] is False
+    assert "penalty_adjusted_below_threshold" in score.metadata["failed_conditions"]
+    # it is the magnitude floor, not the critical-flavor veto, that closed it.
+    assert "critical_penalty" not in score.metadata["failed_conditions"]
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(20.0)
+    assert score.value == 0.0
+
+
+def test_bonus_does_not_rescue_penalty_adjusted_floor(scoring_attempt: AttemptState) -> None:
+    """NON-COMPENSATORY (Finding A): elegance/novelty bonuses are NOT in the floor, so
+    they cannot lift a process-failed answer back over the gate. The Solver beats
+    canonical (earns elegance) AND claims+validates novelty — net is high (positive) —
+    but the gate stays CLOSED because the bonus-free floor solve(80) + causal(−60) = 20
+    < 50. This is the whole point of gating on the floor, not on net."""
+    meta = _meta_with_causal_penalty(-60.0)
+    outcome = _clean_outcome(
+        triggered_penalties=["skip_grounded_read"],
+        tool_calls_used=1,  # << canonical 8 -> large elegance bonus
+        novelty_claimed=True,
+        novelty_validated=True,
+    )
+    score = grade(scoring_attempt, meta, outcome)
+    assert score.metadata["components"]["elegance"] > 0.0  # a bonus WAS earned
+    assert score.metadata["components"]["net"] > meta.point_threshold  # net alone would pass
+    assert score.metadata["gate_passed"] is False  # ...but the floor closes the gate
+    assert "penalty_adjusted_below_threshold" in score.metadata["failed_conditions"]
+
+
+def test_causal_penalty_above_floor_keeps_gate_open(scoring_attempt: AttemptState) -> None:
+    """Magnitude-keyed + per-puzzle (Finding A): a non-critical penalty that does NOT
+    drag the penalty-adjusted solve below threshold leaves the gate OPEN
+    (80 − 20 = 60 ≥ 50). Small process slips dock the tiebreaker, not the gate."""
+    meta = _meta_with_causal_penalty(-20.0)
+    outcome = _clean_outcome(triggered_penalties=["skip_grounded_read"])
+    score = grade(scoring_attempt, meta, outcome)
+    assert score.metadata["gate_passed"] is True
+    assert "penalty_adjusted_below_threshold" not in score.metadata["failed_conditions"]
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(60.0)
 
 
 def test_gate_closes_when_not_solved(

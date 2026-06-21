@@ -76,6 +76,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -228,6 +229,56 @@ _DEFAULT_MAX_RETRIES = 2
 _DEFAULT_RETRY_BACKOFF_BASE = 0.5
 
 
+#: Matches any Harmony chat-template control token — ``<|start|>``, ``<|end|>``,
+#: ``<|message|>``, ``<|channel|>``, ``<|return|>``, ``<|constrain|>`` … — i.e. ``<|`` …
+#: ``|>``. A *clean* (non-gpt-oss) response contains none of these, so the presence of a
+#: match is the trigger to normalize; its absence means pass the text through untouched.
+_HARMONY_TOKEN = re.compile(r"<\|[^|>]*\|>")
+
+#: Captures a Harmony channel's content: ``<|channel|>NAME<|message|>BODY`` up to the next
+#: control token (``<|end|>`` / ``<|return|>`` / the next ``<|start|>``) or end of string.
+#: The ``final`` channel carries the model's actual answer; ``analysis`` is hidden CoT
+#: (gpt-oss / OpenAI Harmony response format). ``re.DOTALL`` so a multi-line body matches.
+_HARMONY_CHANNEL = re.compile(
+    r"<\|channel\|>\s*(?P<name>\w+)\s*<\|message\|>(?P<body>.*?)(?=<\|[^|>]*\|>|\Z)",
+    re.DOTALL,
+)
+
+
+def _normalize_harmony(text: str) -> str:
+    """Strip leaked Harmony chat-template control tokens from a model completion.
+
+    A gpt-oss model served through a path that does NOT parse its **Harmony** chat
+    template (OpenAI Harmony response format) leaks control tokens straight into the
+    assistant text — ``<|start|>assistant<|channel|>analysis<|message|>…<|end|>`` (hidden
+    chain-of-thought) followed by ``<|channel|>final<|message|>…<|end|>`` (the real
+    answer), plus stray ``<|start|>``/``<|end|>``/``<|return|>``. A clean adapter response
+    (qwen3-coder and friends, or a correctly-parsing serving path) carries NONE of these,
+    so this transforms ONLY when a control token is actually present and otherwise returns
+    the input object UNCHANGED (``is`` identity — no copy, no surprise re-encoding).
+
+    When the channel structure is present, the **last ``final`` channel's** message is the
+    model's answer (the ``analysis`` channel is hidden reasoning, dropped); its body is
+    returned with surrounding whitespace trimmed. When control tokens are present but no
+    ``final`` channel is found (a partial/odd leak): if a ``<|message|>`` header marker is
+    present, the body after the LAST one is the content (the preamble — ``<|start|>assistant``
+    role header — is dropped); otherwise every ``<|…|>`` token is stripped and the residue
+    trimmed. A best-effort recovery that still hands the parser clean text. Surfaces nothing
+    on a clean response: identity in, identity out.
+    """
+    if not _HARMONY_TOKEN.search(text):
+        return text  # clean response — pass through byte-for-byte (no over-stripping)
+    finals = [m.group("body") for m in _HARMONY_CHANNEL.finditer(text)
+              if m.group("name") == "final"]
+    if finals:
+        return finals[-1].strip()
+    # No recognizable final channel. If a message header is present, the content is the
+    # body after the LAST <|message|> (drop the <|start|>role… header preamble); strip any
+    # residual control tokens from it. Else strip all tokens from the whole text.
+    body = text.rsplit("<|message|>", 1)[-1] if "<|message|>" in text else text
+    return _HARMONY_TOKEN.sub("", body).strip()
+
+
 def _extract_text(response: dict[str, Any]) -> str:
     """Pull the assistant text out of an Ollama ``/api/chat`` response.
 
@@ -235,12 +286,18 @@ def _extract_text(response: dict[str, Any]) -> str:
     Falls back to a top-level ``"response"`` (the ``/api/generate`` shape) so a fake
     client may return either, then to ``""`` — never raising on a missing field, since
     an empty completion is a legitimate (if unhelpful) model answer the caller scores.
+
+    The extracted text is normalized through :func:`_normalize_harmony` so a gpt-oss
+    Harmony chat-template leak (control tokens in ``content``, observed on a real run)
+    is collapsed to the model's actual final-channel message before any caller — the
+    ReAct :mod:`ai_crucible.solver_loop` parser, the judge, the characterization probe —
+    sees it. A clean (non-Harmony) completion is unaffected (identity pass-through).
     """
     message = response.get("message")
     if isinstance(message, dict) and "content" in message:
-        return str(message["content"])
+        return _normalize_harmony(str(message["content"]))
     if "response" in response:
-        return str(response["response"])
+        return _normalize_harmony(str(response["response"]))
     return ""
 
 
