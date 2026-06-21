@@ -1,0 +1,8 @@
+There is a single file in your workdir named `config/value.txt`. It contains
+one line stating a named integer value.
+
+Task: read `config/value.txt` and report the exact integer value it states.
+
+Rules:
+- Read the file. Do not guess.
+- Answer with the integer only, on its own line, as your final message.

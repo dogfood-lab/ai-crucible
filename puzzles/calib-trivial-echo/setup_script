@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Sandboxed environment priming for the calib-trivial-echo calibration puzzle.
+#
+# KNOWN_TRIVIAL anchor (research-grounding §11.3): the one source file states the
+# value plainly; a competent grounded Solver reads it in a single step and reports
+# the integer. The grading oracle lives out-of-band and is NOT staged here.
+#
+# The kernel's `sandbox` module executes this inside the locked, network-less
+# container (§10.4). The puzzle loader only RESOLVES this path — it never runs it,
+# and it never reads the oracle/ sibling directory (§10.4, src/ai_crucible/puzzle.py).
+set -euo pipefail
+
+mkdir -p config
+
+# The single source file. It states the value plainly — no trap, no noise, no
+# sibling decoys. Reading it is the one-step grounded solve.
+cat > config/value.txt <<'EOF'
+THE_VALUE = 42
+EOF
