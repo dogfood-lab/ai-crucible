@@ -46,7 +46,9 @@ Standards compliance (the six — workflow-standards.md)
   (deterministic-kwargs + metadata assertions).
 * **ANDON_AUTHORITY — n/a:** halting authority is the kernel's (budget/andon); an
   adapter is a leaf the kernel drives. A transport error surfaces as an exception
-  for the caller's andon, never a silent empty completion.
+  for the caller's andon, never a silent empty completion — and likewise a
+  *served≠requested* model surfaces as :class:`ModelMismatchError` (§11.6 /
+  models-cli-002), never a judgment silently mis-attributed to the requested model.
 * **NAMED_COMPENSATORS — n/a:** a completion is a pure read; the adapter performs no
   irreversible action (no publish/write/network mutation) to compensate.
 * **DECOMPOSE_BY_SECRETS — 2:** the adapter knows only model-serving config; it
@@ -55,7 +57,11 @@ Standards compliance (the six — workflow-standards.md)
 * **UNCERTAINTY_GATED_HUMANS — n/a:** no human checkpoint at the model-call layer.
 * **EXTERNAL_VERIFIER — 3:** the whole point — :meth:`as_judge` tags the judge with
   its ``family`` so the panel can structurally drop a same-family judge (§10.2);
-  proven by the ``JudgePanel`` exclusion test.
+  proven by the ``JudgePanel`` exclusion test. The family tag is only trustworthy if
+  the *served* model is the *requested* one, so :meth:`_complete_raw` verifies the
+  response's ``model`` field matches the request (modulo a cloud suffix) and raises
+  :class:`ModelMismatchError` on a silent fallback — a mis-served judge can never have
+  its judgment attributed to (and excluded as) the wrong family (§11.6 / models-cli-002).
 """
 
 from __future__ import annotations
@@ -70,7 +76,55 @@ from ai_crucible.characterize.types import JudgmentRecord
 from ai_crucible.scoring.judge_panel import JudgeFn
 from ai_crucible.types import AttemptState, Score
 
-__all__ = ["OllamaModel", "OllamaClient"]
+__all__ = ["OllamaModel", "OllamaClient", "ModelMismatchError"]
+
+
+class ModelMismatchError(RuntimeError):
+    """The served model does not match the requested model (provenance breach, §11.6).
+
+    Raised when Ollama answers HTTP 200 but its response ``model`` field names a tag
+    *different* from the one requested (modulo a trailing cloud suffix, see
+    :func:`_norm_model`). Under the ``load → judge → evict`` / ``OLLAMA_NUM_PARALLEL=1``
+    serving topology (§11.2) a load timeout, an alias resolving to a different tag, or a
+    previously-loaded model answering would otherwise let a JudgmentRecord be stamped
+    with the *requested* ``model_id``/``family`` while a *different* model actually
+    produced the judgment — corrupting both the measurement and the EXTERNAL_VERIFIER
+    family tag with no error (models-cli-002).
+
+    Surfacing this as an exception (rather than silently attributing the judgment to the
+    requested model) matches the adapter's stated ANDON contract — "a transport error
+    surfaces as an exception for the caller's andon, never a silent" wrong attribution —
+    so the kernel's andon can halt before a mis-attributed record propagates downstream.
+    """
+
+    def __init__(self, requested: str, served: str) -> None:
+        self.requested = requested
+        self.served = served
+        super().__init__(
+            f"served model {served!r} != requested {requested!r} "
+            f"(normalized {_norm_model(served)!r} != {_norm_model(requested)!r}): "
+            "refusing to attribute this judgment to the requested model "
+            "(provenance breach, §11.6 / models-cli-002)"
+        )
+
+
+def _norm_model(model_id: str | None) -> str:
+    """Normalize a model tag for served-vs-requested comparison (§11.6).
+
+    The Ollama daemon serves a *cloud* tag WITHOUT its suffix — it answers ``glm-5`` for
+    a requested ``glm-5:cloud`` and ``qwen3-coder:480b`` for ``qwen3-coder:480b-cloud``
+    — and may echo ``...:latest`` for an implicit-latest pull. So a served tag that
+    differs only by a trailing ``:latest`` or a trailing cloud suffix (``-cloud`` or
+    ``:cloud``) is the *same* model, not a fallback. A genuine fallback to a different
+    served model (e.g. a tier-timeout substitution) survives this normalization and is
+    caught. (Mirrors the normalization shape in ``swarm/verify_findings.py._norm``.)
+    """
+    m = (model_id or "").strip().replace(":latest", "")
+    for suffix in ("-cloud", ":cloud"):
+        if m.endswith(suffix):
+            m = m[: -len(suffix)]
+            break
+    return m
 
 #: Structural type for the Ollama chat client the adapter drives. Both the official
 #: ``ollama`` async client and the built-in httpx fallback satisfy this; tests pass a
@@ -327,14 +381,42 @@ class OllamaModel:
         needs more than the text — :meth:`judge_item`, which reads the verdict-token
         logprob for confidence (§12) — can inspect it. :meth:`complete` is the text-only
         view over this one request path (no second model call).
+
+        Provenance guard (§11.6 / models-cli-002): Ollama echoes the *served* model in a
+        top-level ``model`` field. This is the one choke point every call flows through
+        (:meth:`complete`/:meth:`generate`/:meth:`judge` and :meth:`judge_item`), so the
+        served-vs-requested check lives here: if the response names a model other than the
+        one requested (modulo a cloud/``:latest`` suffix, :func:`_norm_model`) we raise
+        :class:`ModelMismatchError` rather than let a JudgmentRecord be stamped with the
+        requested ``model_id``/``family`` while a different model actually answered.
         """
         client = self._resolve_client()
-        return await client(
+        response = await client(
             model=self.model_id,
             messages=messages,
             options=self._options(),
             **self._logprob_request(),
         )
+        self._assert_served_matches(response)
+        return response
+
+    def _assert_served_matches(self, response: dict[str, Any]) -> None:
+        """Raise :class:`ModelMismatchError` if the served model != the requested one.
+
+        Reads the top-level ``model`` field Ollama echoes on every ``/api/chat`` response
+        and compares it (modulo a trailing cloud/``:latest`` suffix, :func:`_norm_model`)
+        to :attr:`model_id`. A *missing* ``model`` field is tolerated — older servers /
+        minimal fakes may omit it, and an empty completion is already handled elsewhere —
+        so the guard fails CLOSED only on a *positive* mismatch, never on absence of the
+        provenance field. This keeps every existing call (real server + faked tests that
+        do not echo a model) working while catching the silent-fallback case the finding
+        describes (models-cli-002).
+        """
+        served = response.get("model")
+        if isinstance(served, str) and served and _norm_model(served) != _norm_model(
+            self.model_id
+        ):
+            raise ModelMismatchError(self.model_id, served)
 
     async def complete(self, messages: list[dict[str, Any]]) -> str:
         """Call Ollama chat with the pinned deterministic options and return the text.

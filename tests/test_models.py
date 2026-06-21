@@ -33,6 +33,7 @@ import pytest
 
 from ai_crucible.characterize.types import JudgmentRecord
 from ai_crucible.models import ClaudeModel, OllamaModel
+from ai_crucible.models.ollama_adapter import ModelMismatchError, _norm_model
 from ai_crucible.scoring.judge_panel import JudgePanel, judge_family
 from ai_crucible.types import AttemptState, Budget, FramingArm, Score
 
@@ -469,3 +470,174 @@ def test_judge_does_not_read_chrome(attempt: AttemptState) -> None:
 
     sent = str(client.calls[0]["messages"])
     assert "SECRET_RIVAL" not in sent
+
+
+# --------------------------------------------------------------------------- #
+# Served-vs-requested model provenance guard (models-cli-002, §11.6).
+#
+# Under load->judge->evict / OLLAMA_NUM_PARALLEL=1, a load timeout / alias drift /
+# previously-loaded model answering makes Ollama return HTTP 200 with a DIFFERENT
+# `model` field. The adapter must NOT silently stamp the JudgmentRecord with the
+# requested model_id/family (that corrupts the measurement AND the EXTERNAL_VERIFIER
+# family tag) — it raises ModelMismatchError so the kernel's andon can halt. A served
+# tag that differs only by a trailing cloud suffix (the daemon serves `glm-5` for
+# `glm-5:cloud`) is the SAME model and must NOT raise.
+# --------------------------------------------------------------------------- #
+
+
+class FakeOllamaServedClient:
+    """Ollama ``/api/chat`` fake that echoes a ``model`` field (real-server shape).
+
+    Ollama's response carries the *served* model at the top level. ``served`` defaults
+    to whatever model was requested (faithful server); a test sets it to a DIFFERENT tag
+    to drive the silent-fallback path the provenance guard must catch (models-cli-002).
+    """
+
+    def __init__(self, content: str = "ok", served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        served = self.served if self.served is not None else kwargs["model"]
+        return {
+            "model": served,
+            "message": {"role": "assistant", "content": self.content},
+        }
+
+
+def test_ollama_served_mismatch_raises(attempt: AttemptState) -> None:
+    """A served model != requested model raises ModelMismatchError (RED before the fix).
+
+    The fake daemon is asked for ``qwen3:32b`` but answers with ``hermes3:8b`` (a real
+    tier-timeout fallback). The adapter MUST refuse to attribute this judgment to the
+    requested model — the provenance + same-family-exclusion seal (models-cli-002)."""
+    client = FakeOllamaServedClient(content="contaminated", served="hermes3:8b")
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    with pytest.raises(ModelMismatchError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.requested == "qwen3:32b"
+    assert exc.value.served == "hermes3:8b"
+
+
+def test_ollama_judge_item_served_mismatch_raises() -> None:
+    """The guard also fires on the characterization path: a mis-served judge_item never
+    yields a JudgmentRecord stamped with the (wrong) requested model_id/family."""
+    client = FakeOllamaServedClient(content="A", served="mistral-small:24b")
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    with pytest.raises(ModelMismatchError):
+        asyncio.run(model.judge_item("Q: which? A or B"))
+
+
+def test_ollama_served_matches_does_not_raise(attempt: AttemptState) -> None:
+    """A faithful server (served == requested) flows through unchanged — the guard fails
+    closed only on a POSITIVE mismatch, not on every response."""
+    client = FakeOllamaServedClient(content="clean")  # echoes the requested model
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    out = asyncio.run(model.generate(attempt))
+    assert out == "clean"
+
+
+def test_ollama_cloud_suffix_is_not_a_mismatch(attempt: AttemptState) -> None:
+    """The daemon serves a cloud tag WITHOUT its suffix (``glm-5`` for ``glm-5:cloud``,
+    ``qwen3-coder:480b`` for ``qwen3-coder:480b-cloud``); that is the SAME model and must
+    NOT raise — only a genuine fallback to a different model does."""
+    for requested, served in (
+        ("glm-5:cloud", "glm-5"),
+        ("qwen3-coder:480b-cloud", "qwen3-coder:480b"),
+        ("qwen3:32b", "qwen3:32b:latest"),
+    ):
+        client = FakeOllamaServedClient(content="fine", served=served)
+        model = OllamaModel(requested, family="glm", client=client)
+        # Must complete without raising.
+        assert asyncio.run(model.generate(attempt)) == "fine"
+
+
+def test_ollama_missing_served_field_tolerated(attempt: AttemptState) -> None:
+    """An older server / minimal fake that omits the ``model`` field is tolerated — the
+    guard fails closed only on a positive mismatch, never on absence of provenance."""
+    client = FakeOllamaClient("no-model-field")  # base fake: message only, no `model`
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "no-model-field"
+
+
+def test_norm_model_strips_cloud_and_latest_suffixes() -> None:
+    """The normalization shape (mirrors swarm/verify_findings.py._norm): trailing
+    ``:latest`` and a trailing ``-cloud``/``:cloud`` collapse; a different model does not."""
+    assert _norm_model("glm-5:cloud") == _norm_model("glm-5")
+    assert _norm_model("qwen3-coder:480b-cloud") == _norm_model("qwen3-coder:480b")
+    assert _norm_model("qwen3:32b:latest") == _norm_model("qwen3:32b")
+    assert _norm_model("qwen3:32b") != _norm_model("hermes3:8b")
+    assert _norm_model(None) == ""
+
+
+class FakeClaudeServedClient:
+    """Anthropic Messages fake that echoes a ``model`` field on the response.
+
+    The real Messages API returns the model that answered in a top-level ``model`` field;
+    ``served`` defaults to the requested model (faithful) or is set to a different id to
+    drive the silent-route-to-a-different-model path the provenance guard must catch."""
+
+    def __init__(self, content: str = "ok", served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+        self.messages = _FakeServedMessages(self)
+
+
+class _FakeServedMessages:
+    def __init__(self, parent: FakeClaudeServedClient) -> None:
+        self._parent = parent
+
+    async def create(self, **kwargs: Any) -> dict[str, Any]:
+        self._parent.calls.append(kwargs)
+        served = self._parent.served if self._parent.served is not None else kwargs["model"]
+        return {
+            "model": served,
+            "content": [{"type": "text", "text": self._parent.content}],
+        }
+
+
+def test_claude_served_mismatch_raises(attempt: AttemptState) -> None:
+    """Claude must surface a silent route to a different model too — the ``"claude"``
+    family tag can never be attributed to a judgment a different model produced
+    (models-cli-002, the shared family contract point C)."""
+    client = FakeClaudeServedClient(content="x", served="claude-haiku-3-5")
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    with pytest.raises(ModelMismatchError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.requested == "claude-opus-4-8"
+    assert exc.value.served == "claude-haiku-3-5"
+
+
+def test_claude_served_matches_does_not_raise(attempt: AttemptState) -> None:
+    """A faithful Messages response (served == requested) flows through unchanged."""
+    client = FakeClaudeServedClient(content="fine")  # echoes requested model
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "fine"
+
+
+def test_claude_missing_served_field_tolerated(attempt: AttemptState) -> None:
+    """The existing FakeClaudeClient omits ``model`` — tolerated, not a mismatch."""
+    client = FakeClaudeClient("legacy-shape")  # no `model` key in its response
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "legacy-shape"
+
+
+def test_claude_family_tag_is_correct() -> None:
+    """ClaudeModel exposes a correct fixed family tag for EXTERNAL_VERIFIER exclusion —
+    on the instance, the pin metadata, and the as_judge() callable (shared contract C)."""
+    model = ClaudeModel("claude-opus-4-8", client=FakeClaudeClient())
+    assert model.family == "claude"
+    assert model.pin_metadata()["family"] == "claude"
+    assert judge_family(model.as_judge()) == "claude"

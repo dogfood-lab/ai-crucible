@@ -47,3 +47,21 @@
 - **Coordinator (personal, NOT delegated):** honesty surfaces — README badge, SECURITY.md §1, SHIP_GATE.md, SCORECARD.md.
 
 Discipline: per-finding test-first RED gate; 3 post-fix verifier lenses (contract-completeness / cross-boundary info-flow / invariant-test-completeness) + family-of-call-sites probe; build green (473+ tests) after the wave; coordinator-as-judge on scope.
+
+---
+
+## OUTCOME (closed 2026-06-21)
+
+Amend wave: 5 fix agents, exclusive file ownership, **16/16 fixes red→green** (each proved RED against HEAD — incl. honest out-of-tree RED proofs via `git stash` and throwaway-copy neutering for files an agent did not own). All 22 findings closed (the 2 coverage-badge dups merged).
+
+**Coordinator family-of-call-sites probe caught a missed sibling:** `characterize/metrics.py::family_pref_delta` compared `judged_family == own` raw (un-normalized) — the same scoring-stats-002 pattern in the kin-bias *metric* (not the exclusion gate). A casing drift would mask kin-bias. Fixed by the coordinator (metrics.py unowned by any amend agent) with a test-first RED→GREEN gate (`test_family_pref_delta_normalizes_family_casing`).
+
+**Honesty surfaces (coordinator-authored, per LAW):**
+- Coverage badge **96% → 93%** across all 8 README locales (actual).
+- SECURITY.md §1 reconciled: states `LocalSandbox` (process isolation + workdir confinement, NOT a security sandbox) is what ships in Phase 1; the hardened container config is the *planned* provider; the out-of-band grading edge is a pluggable boundary (separate-host deployment is Phase 2).
+- SHIP_GATE.md reclassified `[all][pypi][cli][npm]`; un-SKIPped now-live CLI rows (exit codes, `--help` — checked; raw-stack-traces flagged as a Stage-C item); wheel name `crucible-` → `ai_crucible-`; version-matches-tag row corrected (v0.2.0 tag exists).
+- SCORECARD.md type-tags corrected.
+
+**Build gate:** `bash verify.sh` GREEN — **473 → 520 tests** (+47), **91.5% → 93.01% coverage**, ruff clean, wheel+sdist build OK, smoke OK. Version held at 0.2.0 (research-preview; v1.0.0 minimum is a director-decided SKIP while ω is circular).
+
+Clean bill of health for Stage A: **0 CRITICAL, 0 HIGH residual.** Proceed to Stage B (proactive health).

@@ -149,8 +149,11 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
 
     Returns:
         A :class:`~ai_crucible.types.Score` whose ``value`` is the net score when the
-        gate passes else ``0.0``, with ``metadata`` carrying ``gate_passed``,
-        ``components``, ``failed_conditions``, and the resolved penalty detail.
+        gate passes else ``0.0``, with ``metadata`` carrying ``gate_passed`` (the
+        authoritative solve verdict observability keys on, not ``value``),
+        ``components``, ``failed_conditions``, ``novelty_validated`` (the boolean
+        novelty verdict so a panel-less consumer can recover it — §8.7), and the
+        resolved penalty detail.
     """
     index = _penalty_index(puzzle)
     triggered = _triggered_penalty_objects(outcome, index)
@@ -224,6 +227,16 @@ def grade(attempt: AttemptState, puzzle: PuzzleMeta, outcome: OracleOutcome) -> 
         "components": components,
         "failed_conditions": failed,
         "has_critical_penalty": has_critical,
+        # Self-describe the novelty verdict so a consumer reading only the oracle
+        # score (no separate 'panel' score on the attempt) can recover it — the
+        # novelty bonus lives in components['novelty'] as a number, but the
+        # boolean verdict was previously absent, so observability._is_novel read 0
+        # off the oracle score and the §8.7 leaderboard novelty-rate under-reported
+        # whenever an attempt was scored without a panel (scoring-stats-003). True
+        # iff the panel-validated claim earned the bonus (claimed AND validated).
+        "novelty_validated": bool(
+            outcome.novelty_claimed and outcome.novelty_validated
+        ),
         "triggered_penalties": [
             {"name": p.name, "flavor": p.goodhart_flavor.value, "weight": p.weight}
             for p in triggered

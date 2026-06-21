@@ -24,6 +24,19 @@ def test_help_and_no_args_show_usage(capsys) -> None:
     assert "usage: ai-crucible" in capsys.readouterr().out
 
 
+def test_usage_banner_version_is_single_sourced(capsys, monkeypatch) -> None:
+    """models-cli-004: the usage banner must read the version from package metadata (the
+    same single source as ``--version``), NOT a hardcoded literal that drifts on the next
+    bump. We monkeypatch the version resolver and assert the banner reflects it — proving no
+    hardcoded version string survives in the banner path."""
+    monkeypatch.setattr(cli, "_version", lambda: "9.9.9-test")
+    assert cli.main(["--help"]) == 0
+    helptext = capsys.readouterr().out
+    assert "9.9.9-test" in helptext
+    # the stale hardcoded literal must be gone from the banner.
+    assert "v0.2.0" not in helptext
+
+
 def test_unknown_command_exits_2_with_message(capsys) -> None:
     assert cli.main(["frobnicate"]) == 2
     assert "unknown command" in capsys.readouterr().err

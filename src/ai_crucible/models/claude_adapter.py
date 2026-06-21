@@ -41,7 +41,11 @@ Standards compliance (the six — workflow-standards.md)
   model client; the panel reads ``.family`` for same-family exclusion; gold labels
   live with the grader, not the adapter). The one addition: this adapter reads a
   **secret** (``ANTHROPIC_API_KEY``) — it does so at call time from the env and never
-  logs or stores it.
+  logs or stores it. Like the Ollama adapter, :meth:`complete` verifies the served
+  model (the Messages API ``model`` echo) matches the requested one and raises
+  :class:`~ai_crucible.models.ollama_adapter.ModelMismatchError` on a silent route to a
+  different model, so the ``"claude"`` family tag is never attributed to a judgment a
+  different model produced (§11.6 / models-cli-002).
 """
 
 from __future__ import annotations
@@ -50,10 +54,11 @@ import time
 from typing import Any, Protocol
 
 from ai_crucible.characterize.types import JudgmentRecord
+from ai_crucible.models.ollama_adapter import ModelMismatchError, _norm_model
 from ai_crucible.scoring.judge_panel import JudgeFn
 from ai_crucible.types import AttemptState, Score
 
-__all__ = ["ClaudeModel", "ClaudeClient"]
+__all__ = ["ClaudeModel", "ClaudeClient", "ModelMismatchError"]
 
 #: The fixed model family for every ClaudeModel — the panel excludes a judge of this
 #: family when Claude is the generator (EXTERNAL_VERIFIER, §10.2).
@@ -215,7 +220,30 @@ class ClaudeModel:
         if system is not None:
             kwargs["system"] = system
         response = await client.messages.create(**kwargs)
+        self._assert_served_matches(response)
         return _extract_text(response)
+
+    def _assert_served_matches(self, response: Any) -> None:
+        """Raise :class:`ModelMismatchError` if the served model != the requested one.
+
+        The Messages API echoes the model that actually answered in a top-level ``model``
+        field (``response.model`` on the SDK object, ``response["model"]`` on a dict). If
+        the API silently routes to a different model (e.g. an alias/snapshot resolving
+        elsewhere), this surfaces it as an exception rather than letting a JudgmentRecord
+        be stamped with the requested ``model_id`` while a different model produced the
+        judgment (§11.6 / models-cli-002 — the same provenance guard the Ollama adapter
+        enforces). A *missing* ``model`` field is tolerated (older/fake responses that do
+        not echo it), so the guard fails closed only on a *positive* mismatch.
+        """
+        served = (
+            response.get("model")
+            if isinstance(response, dict)
+            else getattr(response, "model", None)
+        )
+        if isinstance(served, str) and served and _norm_model(served) != _norm_model(
+            self.model_id
+        ):
+            raise ModelMismatchError(self.model_id, served)
 
     # -- kernel generate plug (§10.2) --------------------------------------- #
 

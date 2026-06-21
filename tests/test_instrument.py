@@ -33,6 +33,7 @@ from ai_crucible.instrument import (
     TuningBudgetError,
     TuningError,
     aspredicted_template,
+    assert_versioned,
     bo_search,
     bump_on_change,
     canonical_bundle_json,
@@ -47,6 +48,10 @@ from ai_crucible.instrument import (
     to_inspect_task,
     two_repo_layout,
 )
+
+# The version-increment helper is private (not in __all__); import it from the
+# submodule directly so the public surface stays unchanged.
+from ai_crucible.instrument.rubric_bundle import _next_version
 
 # --------------------------------------------------------------------------- #
 # prereg
@@ -213,6 +218,101 @@ def test_canonical_bundle_json_is_byte_stable_across_key_order():
     b1 = RubricBundle(weights={"a": 1.0, "b": 2.0}, thresholds={}, judge_prompts={})
     b2 = RubricBundle(weights={"b": 2.0, "a": 1.0}, thresholds={}, judge_prompts={})
     assert canonical_bundle_json(b1) == canonical_bundle_json(b2)
+
+
+# --------------------------------------------------------------------------- #
+# rubric_bundle — assert_versioned (the §9.1 ENFORCING seal)  [finding 001]
+# --------------------------------------------------------------------------- #
+#
+# bump_on_change is a pure *suggester*: nothing forces the caller to assign its
+# return. The ENFORCING half of the §9.1 "version changes iff hash changes"
+# invariant is assert_versioned — a real andon gate that RAISES when the scoring
+# content changed but the version label did not. The RED probe MUTATES the
+# protected thing (a weight, which moves the content hash) while leaving the
+# version label fixed, and asserts the gate FIRES.
+
+
+def test_assert_versioned_raises_when_content_changed_but_version_pinned():
+    # MUTATE THE PROTECTED THING: a weight delta moves the content hash.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0", weights={"answer_key_fetch": -151.0, "elegance_bonus_max": 24.0})
+    # The hash genuinely changed (verify the premise), so leaving version pinned
+    # is exactly the §9.1 "silent retconning" the seal must refuse.
+    assert compile_bundle(old)[0] != compile_bundle(new)[0]
+    with pytest.raises(RubricBundleError) as exc:
+        assert_versioned(old, new)
+    # Structured error shape, naming the unbumped version vector.
+    assert "STATE_RUBRIC_VERSION_NOT_BUMPED" in str(exc.value)
+    assert "hint:" in str(exc.value)
+
+
+def test_assert_versioned_passes_when_changed_content_carries_new_version():
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.1", weights={"answer_key_fetch": -151.0, "elegance_bonus_max": 24.0})
+    # Content changed AND version advanced — the gate is satisfied and returns
+    # the (already-correct) new hash for the caller to record.
+    new_hash = assert_versioned(new=new, old=old)
+    assert new_hash == compile_bundle(new)[0]
+
+
+def test_assert_versioned_passes_on_identical_content_same_version():
+    # No-op edit, same label — nothing to enforce.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0")
+    assert assert_versioned(old, new) == compile_bundle(new)[0]
+
+
+def test_assert_versioned_rejects_relabel_of_identical_content():
+    # Same scoring content but a NEW label is also a §9.1 violation: two
+    # byte-identical bundles must never carry two different versions.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v2.0")  # identical content, different label
+    with pytest.raises(RubricBundleError) as exc:
+        assert_versioned(old, new)
+    assert "STATE_RUBRIC_VERSION_DRIFT" in str(exc.value)
+
+
+def test_bump_on_change_noop_preserves_callers_relabel():
+    # Regression for the no-op branch that silently discarded the caller's label:
+    # identical content but an explicit relabel should keep the NEW label, not
+    # silently revert to old.version.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v2.0")  # identical content, deliberate relabel
+    assert bump_on_change(old, new) == "v2.0"
+
+
+def test_bump_on_change_noop_same_label_keeps_it():
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0")  # identical content, same label
+    assert bump_on_change(old, new) == "v1.0"
+
+
+# --------------------------------------------------------------------------- #
+# rubric_bundle — _next_version date-style / zero-pad handling  [finding 002]
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("old_version", "expected"),
+    [
+        ("2026.06", "2026.07"),  # zero-pad preserved, NOT mangled to 2026.7
+        ("v2026.06", "v2026.07"),
+        ("2026.09", "2026.10"),  # carry past the pad width widens correctly
+        ("v1.09", "v1.10"),
+        ("v01", "v02"),  # single zero-padded segment
+        ("v1.", "v1.+1"),  # dangling dot is not a numeric segment -> +1 suffix
+    ],
+)
+def test_next_version_preserves_zero_padding_and_dangling_dot(old_version, expected):
+    assert _next_version(old_version) == expected
+
+
+def test_bump_on_change_date_style_label_not_mangled():
+    # End-to-end through bump_on_change: a calendar-pinned rubric that changes
+    # content advances to a sane next-month label, not a zero-pad-stripped one.
+    old = _bundle(version="2026.06")
+    new = _bundle(version="2026.06", judge_prompts={"novelty": "DIFFERENT prompt"})
+    assert bump_on_change(old, new) == "2026.07"
 
 
 # --------------------------------------------------------------------------- #

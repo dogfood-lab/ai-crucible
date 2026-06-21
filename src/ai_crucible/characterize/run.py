@@ -36,6 +36,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -58,6 +59,12 @@ from ai_crucible.models.ollama_adapter import OllamaModel
 
 _VERDICT_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
 _CHOICE_RE = re.compile(r"\b([AB])\b")  # case-sensitive: the prompt asks for one letter
+
+#: The hardcoded human–human κ baseline the default (no-human-labels) path falls back to —
+#: mirrors :func:`ai_crucible.characterize.profile.build_profile`'s ``human_human_kappa``
+#: default. Surfaced in the report's ``kappa_baseline`` block as ``provisional=True`` because
+#: it is FABRICATED (no humans in the model-jury path) — characterize-002.
+_DEFAULT_HUMAN_KAPPA = 0.80
 
 #: The standing caveat stamped on every report: the alt-test ω here is a circular
 #: model-jury bootstrap, not a human-grounded substitution test (§12 Q3).
@@ -84,8 +91,10 @@ def _alt_test_human_note(hl: HumanLabels) -> str:
         "model-jury caveat is retired for this run."
     )
 
-# Default local panel (cross-family) — already pulled on the Omen. (model_id, family, quant)
-DEFAULT_PANEL: list[tuple[str, str, str | None]] = [
+# Default local panel (cross-family) — already pulled on the Omen. (model_id, family, quant).
+# ``family`` is ``str | None``: the DEFAULT_PANEL is fully tagged, but the ``--models`` CLI
+# path may stamp ``None`` for an untagged entry (models-cli-001 / SHARED FAMILY CONTRACT).
+DEFAULT_PANEL: list[tuple[str, str | None, str | None]] = [
     ("qwen3.6:27b", "qwen", None),
     ("mistral-small:24b", "mistral", None),
     ("gemma4:31b", "gemma", None),
@@ -187,7 +196,7 @@ def _jury(
 
 
 async def run_panel(
-    panel: list[tuple[str, str, str | None]],
+    panel: list[tuple[str, str | None, str | None]],
     items: list[CalibrationItem],
     *,
     k: int = 3,
@@ -313,13 +322,23 @@ def panel_correlation_report(
 
 
 def _grade_matrix(records: dict[str, list[JudgmentRecord]]) -> dict[str, dict[str, bool]]:
-    """Collapse k reruns to one ``{model_id: {item_id: majority_correct}}`` grid."""
+    """Collapse k reruns to one ``{model_id: {item_id: majority_correct}}`` grid.
+
+    The majority vote breaks an exact tie CONSERVATIVELY toward *incorrect* (``> 0.5``, not
+    ``>= 0.5``) — calibration-instrument-003. This grid feeds :func:`irt.prune_items` (the
+    §12 IRT calibration screen), so an optimistic ``>= 0.5`` tie-break (rounding a 50/50
+    even-k split UP to a pass) could misclassify a knife-edge item as all-pass (zero variance
+    → dropped) or push it across the point-biserial floor, systematically biasing which
+    calibration items survive. The item bank is the foundation of every later measurement, so
+    a tie must be deterministic and conservative: an item is graded "correct" only when a
+    STRICT majority of its reruns were correct; an exact tie (or minority) is "incorrect".
+    """
     matrix: dict[str, dict[str, bool]] = {}
     for model_id, recs in records.items():
         by_item: dict[str, list[bool]] = {}
         for r in recs:
             by_item.setdefault(r.item_id, []).append(bool(r.correct))
-        matrix[model_id] = {iid: (sum(v) / len(v)) >= 0.5 for iid, v in by_item.items()}
+        matrix[model_id] = {iid: (sum(v) / len(v)) > 0.5 for iid, v in by_item.items()}
     return matrix
 
 
@@ -444,6 +463,34 @@ def main(argv: list[str] | None = None) -> int:
         "item_set": args.items.name if args.items else "admission_pairs.json",
         "alt_test_reference": "human" if human_labels else "model-jury-bootstrap",
         "alt_test_caveat": _alt_test_human_note(human_labels) if human_labels else _ALT_TEST_CAVEAT,
+        # characterize-002: the κ one-sided floor + κ-z gate run against a human–human κ
+        # baseline. On the DEFAULT (model-jury) path there are no humans, so build_profile's
+        # 0.80 default is a FABRICATED baseline — surface that in a machine-readable form
+        # (parallel to ``alt_test_caveat`` for the circular ω) so a consumer parsing the JSON
+        # can SEE a κ-floor REJECT / a human-like SEAT is provisional, not human-grounded.
+        # Honesty-only: no human labels are fabricated. On the human-grounded path the
+        # baseline IS the measured human–human Krippendorff α, so it is NOT provisional.
+        "kappa_baseline": (
+            {
+                "value": round(human_labels.iaa_alpha, 4),
+                "provisional": False,
+                "source": (
+                    f"measured human–human Krippendorff α over {human_labels.n_annotators} "
+                    "annotators (Fork C, §12.1) — the κ floor/z gates are human-grounded"
+                ),
+            }
+            if human_labels
+            else {
+                "value": _DEFAULT_HUMAN_KAPPA,
+                "provisional": True,
+                "alt_test_reference": "model-jury-bootstrap",
+                "source": (
+                    "hardcoded default — NOT human-estimated; the κ one-sided floor and κ-z "
+                    "gates (which can SEAT or REJECT a judge) are PROVISIONAL until "
+                    "--human-labels supplies a measured human–human Krippendorff α (§12 Q3)"
+                ),
+            }
+        ),
         "human_alt_test": (
             {
                 "n_annotators": human_labels.n_annotators,
@@ -465,6 +512,31 @@ def main(argv: list[str] | None = None) -> int:
         "panel_composition": panel_composition_report(profiles, records),
     }
     args.out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    # models-cli-003: a measurement instrument that measured NOTHING is a FAILURE, not a
+    # green pass. The per-model try/except (run_panel) keeps one bad model from sinking the
+    # panel, but if EVERY model failed (Ollama down / wrong host / every tag unservable) both
+    # ``profiles`` and ``records`` are empty — emit a structured error (code/message/hint) and
+    # exit NON-ZERO so an automation/CI gate (or the dogfood-swarm harness) that checks the
+    # exit code does not consume a stale/empty characterization report as if valid. Exit 1 is
+    # distinct from the dispatcher's 2 (unknown command).
+    if not profiles or not records:
+        err = {
+            "code": "CHARACTERIZE_NO_JUDGMENTS",
+            "message": (
+                "characterization collected zero judgments — every model failed "
+                "(empty profiles/records)"
+            ),
+            "hint": (
+                "check that Ollama is running and reachable (default http://localhost:11434), "
+                "that each --models tag is pulled/servable, and re-run; the report at "
+                f"{args.out} contains only empty profiles and must not be consumed as valid"
+            ),
+        }
+        sys.stderr.write(json.dumps(err) + "\n")
+        print(f"report -> {args.out}")
+        return 1
+
     seated = [m for m, p in profiles.items() if p.seat_decision.value == "seat"]
     print(f"\nseated: {seated}")
     comp = report["panel_composition"]
@@ -482,16 +554,29 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _parse_models(specs: list[str]) -> list[tuple[str, str, str | None]]:
+def _parse_models(specs: list[str]) -> list[tuple[str, str | None, str | None]]:
     """Parse ``model_id@family`` specs. The model_id itself may contain a ':'
-    (e.g. ``qwen3.6:27b``), so split on the LAST '@' only."""
-    out: list[tuple[str, str, str | None]] = []
+    (e.g. ``qwen3.6:27b``), so split on the LAST '@' only.
+
+    An UNTAGGED entry (no ``@family``) stamps ``family=None`` — NEVER the literal string
+    ``"unknown"`` (models-cli-001, the SHARED EXTERNAL_VERIFIER family contract). ``None``
+    is the honest representation of an unknown family: :func:`judge_family` documents that an
+    untagged judge returns ``None`` and is admitted as cross-family on OPERATOR
+    responsibility (it cannot be *proven* cross-family). A literal ``"unknown"`` is a genuine
+    family value that COLLIDES with every other ``"unknown"`` and is matched by the exact
+    exclusion comparison, so a mixed tagged/untagged SAME-family judge could survive
+    same-family exclusion against a generator also tagged ``"unknown"`` — silently weakening
+    EXTERNAL_VERIFIER (research-grounding §3/§10.2). ``None`` never equals any concrete
+    family, so judge_panel's None-handling applies and the residual is honest (the operator
+    sees the untagged judge was seated on trust via ``panel.metadata["untagged_judges_seated"]``).
+    """
+    out: list[tuple[str, str | None, str | None]] = []
     for s in specs:
         if "@" in s:
             mid, fam = s.rsplit("@", 1)
             out.append((mid, fam, None))
         else:
-            out.append((s, "unknown", None))
+            out.append((s, None, None))  # untagged → None (NOT the colliding "unknown")
     return out
 
 

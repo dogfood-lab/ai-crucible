@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from ai_crucible.calibration.types import CalibrationCategory, CalibrationItem
 from ai_crucible.characterize.run import (
+    _grade_matrix,
     _jury,
     _parse_models,
     _to_num,
     irt_prune_report,
     known_groups_report,
+    main,
     panel_composition_report,
     panel_correlation_report,
     parse_choice,
@@ -42,8 +44,27 @@ def test_parse_models_handles_colon_in_model_id() -> None:
     ]
 
 
-def test_parse_models_no_family() -> None:
-    assert _parse_models(["llama3"]) == [("llama3", "unknown", None)]
+def test_parse_models_untagged_yields_none_not_unknown() -> None:
+    """models-cli-001 (SHARED FAMILY CONTRACT): an untagged ``--models`` entry must stamp
+    family=None, NOT the literal string "unknown".
+
+    Per the cross-family seal, an untagged/unknown family is represented as Python None so
+    judge_panel's None-handling applies (a None-family judge is admitted as cross-family on
+    OPERATOR responsibility, never silently kept under a colliding "unknown" tag). The
+    literal "unknown" is a genuine string value that collides with every other "unknown",
+    so a mixed tagged/untagged SAME-family judge could survive exclusion against a generator
+    also tagged "unknown". None never equals a concrete family, so the residual is honest.
+    """
+    assert _parse_models(["llama3"]) == [("llama3", None, None)]
+    # mixed tagged/untagged in one call: the tagged one keeps its family, the untagged → None
+    assert _parse_models(["qwen3.6:27b@qwen", "llama3"]) == [
+        ("qwen3.6:27b", "qwen", None),
+        ("llama3", None, None),
+    ]
+    # the colliding literal must not appear anywhere in the parsed families.
+    fams = [fam for _mid, fam, _q in _parse_models(["a", "b", "c"])]
+    assert "unknown" not in fams
+    assert fams == [None, None, None]
 
 
 def test_known_groups_report() -> None:
@@ -175,3 +196,125 @@ def test_panel_composition_report_wiring() -> None:
     assert [s["model_id"] for s in rep["seats"]] == ["a", "b", "c"]
     assert rep["meets_quorum"] is True and rep["escalate"] is False
     assert rep["not_seated"] == ["z"]
+
+
+# --------------------------------------------------------------------------- #
+# calibration-instrument-003 — _grade_matrix tie-break is conservative (<0.5)
+# --------------------------------------------------------------------------- #
+
+
+def test_grade_matrix_even_split_tie_resolves_to_incorrect() -> None:
+    """calibration-instrument-003: an exact 50/50 tie on an even number of reruns must
+    resolve DETERMINISTICALLY to ``incorrect`` (conservative toward non-solve), NOT round up
+    to ``correct``.
+
+    The majority-collapsed boolean grid feeds prune_items (the IRT calibration screen).
+    Rounding ties UP toward 'pass' was an optimistic tie-break that could classify a
+    knife-edge item as all-pass (zero variance → dropped) or push it across the
+    point-biserial floor, systematically biasing which calibration items survive. The
+    instrument's item bank is the foundation of every later measurement, so the tie-break
+    must be explicit and conservative: a fraction strictly GREATER than 0.5 is the only
+    'correct' verdict; an exact tie is 'incorrect'.
+    """
+    # k=2, one pass one fail → fraction 0.5 → must collapse to False (incorrect).
+    records = {
+        "m": [
+            _rec("tie", "m", correct=True),
+            _rec("tie", "m", correct=False),
+        ]
+    }
+    matrix = _grade_matrix(records)
+    assert matrix["m"]["tie"] is False
+    # Sanity: a clear majority pass (>0.5) is still correct; a clear majority fail is False.
+    clear = {
+        "m": [
+            _rec("pass", "m", correct=True),
+            _rec("pass", "m", correct=True),
+            _rec("pass", "m", correct=False),  # 2/3 > 0.5 → correct
+            _rec("fail", "m", correct=True),
+            _rec("fail", "m", correct=False),
+            _rec("fail", "m", correct=False),  # 1/3 < 0.5 → incorrect
+        ]
+    }
+    cm = _grade_matrix(clear)
+    assert cm["m"]["pass"] is True
+    assert cm["m"]["fail"] is False
+
+
+# --------------------------------------------------------------------------- #
+# models-cli-003 — main() exits non-zero when zero judgments are collected
+# --------------------------------------------------------------------------- #
+
+
+def test_main_exits_nonzero_when_every_model_fails(tmp_path, monkeypatch, capsys) -> None:
+    """models-cli-003: ``ai-crucible characterize`` must exit NON-ZERO (with a structured
+    code/message/hint) when run_panel collects zero judgments — Ollama down / wrong host /
+    every model tag unservable. A measurement instrument that measured NOTHING is a failure,
+    not a green pass; an automation/CI gate that shells out and checks the exit code must
+    not treat empty profiles as success (silent data loss presented as green)."""
+
+    async def _empty_panel(*_a, **_k):
+        # both profiles and all_records empty — the total-failure path.
+        return {}, {}
+
+    monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _empty_panel)
+    out_path = tmp_path / "report.json"
+    code = main(["--out", str(out_path)])
+    assert code != 0
+    err = capsys.readouterr().err
+    # a structured error shape (code/message/hint) — not a raw stack.
+    assert "code" in err and "message" in err and "hint" in err
+
+
+def test_main_exits_zero_on_a_real_profile(tmp_path, monkeypatch) -> None:
+    """Contrast: when at least one profile is produced, main() returns 0 (the happy path
+    is unchanged by the total-failure guard)."""
+    prof = JudgeProfile(
+        model_id="m", role=RoleSlot.JUDGE, n_items=4,
+        reliability_weight=1.0, seat_decision=SeatDecision.SEAT, metadata={},
+    )
+    records = {"m": [_rec(f"i{j}", "m", correct=True) for j in range(4)]}
+
+    async def _one_panel(*_a, **_k):
+        return {"m": prof}, records
+
+    monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _one_panel)
+    out_path = tmp_path / "report.json"
+    assert main(["--out", str(out_path)]) == 0
+
+
+# --------------------------------------------------------------------------- #
+# characterize-002 — default (model-jury) report carries a machine-readable
+#                    provisional caveat on the κ baseline
+# --------------------------------------------------------------------------- #
+
+
+def test_default_report_marks_kappa_baseline_provisional(tmp_path, monkeypatch) -> None:
+    """characterize-002: the default (no --human-labels) path applies the κ one-sided floor
+    + κ-z gate against a hardcoded human_human_kappa=0.80 with no humans in the loop. The
+    emitted report must carry a MACHINE-READABLE flag (provisional=True /
+    alt_test_reference='model-jury-bootstrap' + a kappa_baseline.provisional flag) so a
+    consumer can SEE the κ seat/reject gate is provisional — without fabricating human
+    labels. The human-grounded path must NOT carry the provisional flag."""
+    prof = JudgeProfile(
+        model_id="m", role=RoleSlot.JUDGE, n_items=4,
+        reliability_weight=1.0, seat_decision=SeatDecision.SEAT, metadata={},
+    )
+    records = {"m": [_rec(f"i{j}", "m", correct=True) for j in range(4)]}
+
+    async def _one_panel(*_a, **_k):
+        return {"m": prof}, records
+
+    monkeypatch.setattr("ai_crucible.characterize.run.run_panel", _one_panel)
+    out_path = tmp_path / "report.json"
+    assert main(["--out", str(out_path)]) == 0
+    import json
+
+    report = json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["alt_test_reference"] == "model-jury-bootstrap"
+    kb = report.get("kappa_baseline")
+    assert kb is not None
+    assert kb["provisional"] is True
+    assert kb["value"] == 0.80
+    # the source string must make the fabrication explicit (not human-estimated).
+    assert "human" in kb["source"].lower()

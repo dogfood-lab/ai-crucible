@@ -44,6 +44,7 @@ from ai_crucible.engagement import SealedBoundaryViolation, build_chrome
 from ai_crucible.kernel import run_attempt, run_pass_hat_k
 from ai_crucible.observability import PuzzleHistory
 from ai_crucible.puzzle import LoadedPuzzle, load_puzzle
+from ai_crucible.roles import ChromeAccessError
 from ai_crucible.scoring.judge_panel import JudgePanel
 from ai_crucible.scoring.oracle import OracleOutcome
 from ai_crucible.types import (
@@ -519,22 +520,28 @@ def _in_place_leaking_generate(token: str, *, return_text: str = _CORRECT_ANSWER
 
 def _critic_leaking_generate(token: str):
     """A fake ``generate`` shared by Solver+Critic that leaks only on the CRITIC
-    turn: the first call (Solver) returns clean; the second call (Critic) splices
-    ``token`` into an existing message in place. Isolates the post-Critic re-check.
-    """
+    turn through the Critic's REAL message shape: the first call (Solver) returns
+    clean; the second call (Critic) RETURNS a critique string carrying ``token``.
+
+    This is the actual Critic leak vector (kernel-core-002): the enabled Critic
+    routes ``generate``'s return value into ``Critic.message(critique)`` →
+    ``{'role': 'critic', 'critique': critique, 'anonymized': ...}`` and appends it
+    to ``state.messages`` (roles.py). The text lives under ``critique``, NOT
+    ``content``. The earlier version of this fixture leaked via an in-place edit of
+    ``messages[0]['content']`` — a path ``content``-only scanning already covered —
+    so it never exercised the field the Critic itself writes. Returning the token
+    in the critique drives the leak through the genuine appended-message shape, so
+    the kernel post-Critic re-check must catch it (RED until engagement scans the
+    ``critique`` field; GREEN after, per kernel-core-001/-002)."""
     state = {"calls": 0}
 
     async def _gen(attempt: AttemptState) -> str:
         state["calls"] += 1
         if state["calls"] == 1:
             return _CORRECT_ANSWER  # Solver: clean
-        # Critic turn: in-place leak the kernel's post-Critic re-check must catch.
-        if attempt.messages:
-            attempt.messages[0] = dict(attempt.messages[0])
-            attempt.messages[0]["content"] = (
-                str(attempt.messages[0].get("content", "")) + f" [leak: {token}]"
-            )
-        return "a critique"
+        # Critic turn: the leak rides in the RETURNED critique string, which the
+        # Critic appends as {role:'critic', 'critique': <this>, ...}.
+        return f"The leading entry is from {token}; surpass it."
 
     return _gen
 
@@ -563,19 +570,34 @@ def test_chrome_leak_after_solver_turn_raises(sample_dir: Path) -> None:
 
 
 def test_chrome_leak_after_critic_turn_raises(sample_dir: Path) -> None:
-    """A leak introduced by the CRITIC turn (in-place edit) is caught by the
-    kernel's POST-Critic re-check → SealedBoundaryViolation (H1, §10.1(e)).
+    """A leak in the CRITIC's OWN appended message (text under ``critique``) is
+    caught by the kernel's POST-Critic re-check → SealedBoundaryViolation
+    (H1, §10.1(e); kernel-core-002).
 
-    The Solver runs clean; the enabled Critic mutates an existing message in place.
-    Only the kernel's post-Critic re-check covers this message-mutating site."""
+    The Solver runs clean; the enabled Critic returns a critique string carrying a
+    chrome token, which it appends as ``{role:'critic', 'critique': ..., ...}`` —
+    the field the Critic actually populates, NOT ``content``. This drives the leak
+    through the real Critic message shape (formerly the fixture leaked via an
+    in-place ``content`` edit that already-covered code caught, giving false
+    assurance).
+
+    The attempt MUST halt with a sealed-boundary andon. Both andon layers delegate
+    to the SAME engagement guard (research-grounding §10.1(e)): the Critic-turn
+    role :class:`ChromeAccessError` (it inspects the messages the Critic appended
+    this turn — including its critique) and the kernel's post-Critic
+    :class:`SealedBoundaryViolation` re-check both now scan the ``critique`` field.
+    The role guard fires first for this vector (defense in depth); accepting either
+    proves the critique field is no longer an unguarded scored-context surface.
+    Against pre-fix code (content-only scan) NEITHER guard sees the critique token,
+    so the attempt completes and this raises nothing → RED. The fix turns it GREEN."""
     loaded = load_puzzle(sample_dir)
     chrome = build_chrome(rank=11, cohort_size=12, leaderboard=[{"solver": "solver-omega"}])
-    with pytest.raises(SealedBoundaryViolation):
+    with pytest.raises((SealedBoundaryViolation, ChromeAccessError)):
         anyio.run(
             lambda: run_attempt(
                 sample_dir,
                 "m",
-                # Solver returns clean; the Critic generate does the in-place leak.
+                # Solver returns clean; the Critic's RETURNED critique carries the leak.
                 generate=_critic_leaking_generate("solver-omega"),
                 oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
                 chrome=chrome,

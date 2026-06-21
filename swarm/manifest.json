@@ -9,7 +9,9 @@
     "tests_passed": 473,
     "coverage_pct": 91.5,
     "verify": "green",
-    "note": "README badge claims 96% — drift to fix (actual 91.5%)"
+    "note": "README badge claims 96% — drift to fix (actual 91.5%)",
+    "post_stage_a_tests": 520,
+    "post_stage_a_coverage_pct": 93.01
   },
   "cross_family_verifiers": {
     "roster_live_verified_2026-06-21": {
@@ -22,8 +24,17 @@
       "minimax-m3:cloud": "MiniMax (1M ctx + vision)",
       "nemotron-3-ultra:cloud": "NVIDIA (largest Nemotron)"
     },
-    "stage_a_panel": ["deepseek-v4-pro:cloud", "kimi-k2.6:cloud", "qwen3-coder:480b-cloud", "glm-5:cloud", "gpt-oss:120b-cloud"],
-    "retired": ["glm-4.6 (410, 2026-06-16)", "minimax-m2 (410, 2026-06-16)"],
+    "stage_a_panel": [
+      "deepseek-v4-pro:cloud",
+      "kimi-k2.6:cloud",
+      "qwen3-coder:480b-cloud",
+      "glm-5:cloud",
+      "gpt-oss:120b-cloud"
+    ],
+    "retired": [
+      "glm-4.6 (410, 2026-06-16)",
+      "minimax-m2 (410, 2026-06-16)"
+    ],
     "discipline": "verify returned model field == requested modulo -cloud suffix (tier-timeout falls back to local hermes3:8b); 2-3 families vote on every HIGH/CRITICAL (convergence = highest confidence); synthesize against code, do not relay; cloud runs server-side (zero local GPU)",
     "harness": "adapted from E:/AI/readouts/xrpl-knowledge/scripts/verify_cloud.py (crash-safe incremental, _norm_model fallback guard, refute-by-default external rubric)",
     "generator_family": "anthropic/claude (excluded from verifier panel)"
@@ -43,6 +54,6 @@
   },
   "phases": {
     "stage-a": "Bug/Security/Correctness/Eval-integrity audit -> cross-family verify -> review gate -> amend (v2 mechanics)",
-    "status": "stage-a audit dispatched"
+    "status": "stage-a CLOSED (0 CRIT/0 HIGH residual; 520 tests, 93.01% cov); next stage-b"
   }
 }

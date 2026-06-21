@@ -96,18 +96,30 @@ def aggregate_pass_hat_k(outcomes: Sequence[bool], k: int) -> float:
     ``p ** k`` (Chen et al. 2021 introduced the pass@k estimator family; pass^k
     is its all-must-succeed sibling). Special cases:
 
-    - ``k <= 0`` -> ``1.0`` (the empty conjunction of trials trivially holds).
     - empty ``outcomes`` -> ``0.0`` (no evidence of success).
+
+    The consistency horizon is ``k >= 1`` — you cannot be *consistent* over
+    fewer than one trial. We REJECT ``k < 1`` with a ``ValueError`` to share the
+    one boundary contract :func:`ai_crucible.scoring.stats.pass_hat_k` already
+    enforces (and that ``run_pass_hat_k`` assumes via ``k >= 1``); the two
+    implementations of this same named metric must not diverge at the boundary
+    (scoring-stats-004 — the Wave-2 unification injects one ``interval`` impl, so
+    a silent ``k<=0 -> 1.0`` here vs a raise there would be a latent trap).
 
     Args:
         outcomes: per-attempt success flags (e.g. one bool per sibling attempt).
-        k: the consistency depth; how many independent successes are required.
+        k: the consistency depth; how many independent successes are required
+            (``k >= 1``).
 
     Returns:
         pass^k as a float in [0, 1].
+
+    Raises:
+        ValueError: if ``k < 1`` (a consistency horizon below one trial is
+            undefined — matches :func:`ai_crucible.scoring.stats.pass_hat_k`).
     """
-    if k <= 0:
-        return 1.0
+    if k < 1:
+        raise ValueError(f"pass^k consistency horizon must be >= 1, got k={k}")
     n = len(outcomes)
     if n == 0:
         return 0.0
@@ -119,16 +131,32 @@ def aggregate_pass_hat_k(outcomes: Sequence[bool], k: int) -> float:
 def _attempt_solved(attempt: AttemptState, *, score_key: str = "oracle") -> bool:
     """Decide whether an attempt counts as a solve.
 
-    A solve requires a clean terminal status (``COMPLETED``) AND a truthy oracle
-    score. A budget/time/hard-kill/error termination is *not* a solve even if a
+    A solve requires a clean terminal status (``COMPLETED``) AND a passing oracle
+    verdict. A budget/time/hard-kill/error termination is *not* a solve even if a
     partial score leaked in — pass^k must reflect end-to-end success
     (terminal-world-state grading, τ-bench / finding 6).
+
+    **The authoritative solve signal is the §8.3 conjunctive *gate*, not the
+    tiebreaker net** (scoring-stats-001). :func:`ai_crucible.scoring.oracle.grade`
+    records the gate verdict in ``score.metadata['gate_passed']`` and sets
+    ``score.value`` to the net only as a within-passing-region tiebreaker (it can
+    be ≤ 0 on a passing gate when a non-critical REGRESSIONAL penalty outweighs
+    solve+bonuses, since penalties are unbounded relative to solve). Reading
+    ``value > 0`` would mis-derive such a clean solve as UNSOLVED and silently
+    corrupt pass^k / solve-rate / graduation rollups — the grading authority and
+    the reported reliability metric must not disagree. So we prefer the explicit
+    boolean ``gate_passed`` flag when the score carries the oracle gate envelope,
+    and only fall back to the tolerant truthy interpretation for scores that lack
+    it (e.g. a bool ``"C"``/``True`` Inspect-style score).
     """
     if attempt.terminated_by not in (None, TerminatedBy.COMPLETED):
         return False
     score = attempt.scores.get(score_key)
     if score is None:
         return False
+    gate_passed = score.metadata.get("gate_passed")
+    if isinstance(gate_passed, bool):
+        return gate_passed
     return _score_is_truthy(score.value)
 
 

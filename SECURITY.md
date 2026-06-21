@@ -16,10 +16,18 @@ All claims below are grounded in `docs/research-grounding.md` (§10.1(d), §10.4
 
 ### 1. The sandbox is not a hard boundary — out-of-band grading is (§10.4)
 
-The Solver runs in a locked container reached only through a narrow
-`exec` / `read_file` / `write_file` channel (no raw shell). The container is
-hardened: digest-pinned per-puzzle image, `cap_drop: ALL`, default seccomp,
-`no-new-privileges`, non-root, `read_only` rootfs, `network_mode: none`.
+The Solver reaches its environment only through a narrow
+`exec` / `read_file` / `write_file` channel (no raw shell). **What ships today
+(Phase 1) is `LocalSandbox`** (`src/ai_crucible/sandbox.py`): a local-subprocess
+provider that pins the working directory, rejects path escapes (`..`,
+absolute-outside, symlink targets resolving outside root), caps per-stream output,
+and kills the whole process *tree* on a timeout. It is **process isolation plus
+working-directory confinement — not a security sandbox** (the module docstring
+states exactly that). The **hardened container** — digest-pinned per-puzzle image,
+`cap_drop: ALL`, default seccomp, `no-new-privileges`, non-root, `read_only`
+rootfs, `network_mode: none` — is the **planned provider for a later wave**, the
+target posture, *not* a shipped guarantee. Do not over-trust the config above as
+current containment.
 
 **Honest residual risk:** a plain Linux container is *not* a hard security
 boundary against a determined in-container adversary. Container-escape classes
@@ -30,15 +38,21 @@ are real and recurring:
 - **CVE-2025-31133** — runc bind-mount / `/dev/null` masking flaw enabling
   privileged host access.
 
-These are illustrative, not exhaustive; new escapes will land. Therefore the
-**real lock is architectural, not containment-based**: the oracle, answer key,
-and locked tests live **only on the grading side** — a separate host process the
-Solver container has *zero* network and *zero* filesystem path to. After the
-Solver halts, the kernel copies the working directory out and grades it in a
-**fresh** container (the SWE-bench `test_patch` timing pattern). Even a full
-container escape lands the Solver on a host that does not contain the answer.
-In-container hiding (read-only verifier, locked git history, locked test files)
-is **defense-in-depth on top of** that boundary, never the boundary itself.
+These are illustrative, not exhaustive; new escapes will land — and the
+local-subprocess provider that ships today is *weaker still* than a hardened
+container. Therefore the **real lock is architectural, not containment-based**:
+the oracle, answer key, and locked tests live **only on the grading side** — a
+separate host/process the Solver has *zero* network and *zero* filesystem path to.
+After the Solver halts, the kernel hands a **copy** of the working directory to an
+out-of-band grading edge (`copy_workdir_out` + the injected `oracle_runner`), which
+applies the oracle to that copy (the SWE-bench `test_patch` timing pattern). The
+oracle is never carried back into the Solver's namespace. In the shipped Phase-1
+topology that grading edge is a **pluggable boundary** (the kernel never loads the
+oracle itself); deploying it as a separate grading host / fresh container — so even
+a full local escape lands on a host that does not contain the answer — is the
+Phase-2 deployment step. In-environment hiding (read-only verifier, locked git
+history, locked test files) is **defense-in-depth on top of** that boundary, never
+the boundary itself.
 
 - WSL2 / Windows operators: keep the oracle Windows-host-side and enable
   Enhanced Container Isolation (§10.4).

@@ -426,6 +426,25 @@ def test_family_pref_delta_zero_without_both_groups() -> None:
     assert family_pref_delta(records) == 0.0
 
 
+def test_family_pref_delta_normalizes_family_casing() -> None:
+    """Casing/whitespace drift between the two family-tag sites must NOT split a
+    same-family pair into the different-family bucket (sibling of scoring-stats-002).
+
+    The judged-output family and the judge's own family are stamped by independent
+    sites; ``"Qwen"`` vs ``"qwen"`` is the same family. A raw ``judged == own``
+    compare would route the (correct) same-family records into ``diff``, empty the
+    ``same`` group, and return 0.0 — silently MASKING kin-bias the cross-family
+    panel exists to detect. With casefold/strip normalization the contrast is real
+    (Δ = +1.0). RED against the raw comparison, GREEN after.
+    """
+    records = [
+        rec(f"s{i}", 1, 1, judged_family="Qwen", judge_family="qwen") for i in range(5)
+    ] + [
+        rec(f"d{i}", 0, 1, judged_family="llama", judge_family="qwen") for i in range(5)
+    ]
+    assert family_pref_delta(records) == pytest.approx(1.0)
+
+
 # --------------------------------------------------------------------------- #
 # build_profile — SEAT for a strong judge, REJECT for a random one (prove both)
 # --------------------------------------------------------------------------- #
@@ -532,6 +551,51 @@ def test_build_profile_bias_penalizes_quality_score() -> None:
     # And it moves the selective decision: the biased judge no longer seats.
     assert biased_p.seat_decision is not SeatDecision.SEAT
     assert any("bias" in note for note in biased_p.notes)
+
+
+def test_bias_panel_reports_not_measured_when_no_trials_staged() -> None:
+    """characterize-001: in the default run (no bias trials staged) the bias panel must
+    report "not measured" — NOT "measured 0.000 → PASS".
+
+    collect_records never sets ``position``/``answer_len``/``judged_family``, so the three
+    bias metrics are definitionally 0.0 and the bias gate is structurally inert. Unlike
+    consistency and ECE — which emit explicit "not measured" branches — the bias panel
+    formatted the three zeros as a passing measured gate, so a reviewer reads "this judge has
+    no position/verbosity/self-preference bias" when the instrument never staged a single
+    bias trial. The fix is honesty-only (do NOT fabricate trials): when no bias signal is
+    present, the note must say "not measured" and the JudgeProfile bias fields must be None
+    so a consumer cannot read 0.0 as "unbiased". The kin-/position-bias path (with trials)
+    must still report a measured number."""
+    # A seat-worthy judge with NO bias trials staged (no position/answer_len/family tags).
+    records = strong_judge_records()
+    profile = build_profile("no-bias-trials", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+
+    # The note must say bias was not measured — not present a passing measured gate.
+    assert any(
+        "bias not measured" in note.lower() for note in profile.notes
+    ), profile.notes
+    assert not any(
+        "→ max 0.000" in note or "-> max 0.000" in note for note in profile.notes
+    ), "inert bias must not be formatted as a measured 0.000 PASS"
+    # The JudgeProfile bias fields are None (not 0.0) so a report consumer cannot misread
+    # 0.0 as "measured, unbiased".
+    assert profile.position_bias is None
+    assert profile.verbosity_bias is None
+    assert profile.family_pref_delta is None
+
+    # Contrast: when position-swap trials ARE staged, the bias panel reports a measured
+    # number (a float), not "not measured".
+    gold = _gold(40)
+    staged: list[JudgmentRecord] = []
+    for i in range(40):
+        g = gold[i]
+        p = min(5, g + 1) if i % 6 == 0 else g
+        staged.append(rec(f"i{i}", p, g, position=0, run_index=0))
+        flip = min(5, g + 1) if i % 2 == 0 else p
+        staged.append(rec(f"i{i}", flip, g, position=1, run_index=0))
+    measured = build_profile("biased", RoleSlot.JUDGE, staged, human_human_kappa=0.80)
+    assert measured.position_bias is not None  # a real measured value
+    assert not any("bias not measured" in note.lower() for note in measured.notes)
 
 
 def test_build_profile_empty_records_raises() -> None:

@@ -60,6 +60,10 @@ constraint-dependencies = [
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
+# `swarm/` holds dogfood-swarm receipt tooling (verify harness, manifests), not
+# shipped package code — it is not in the wheel and is not held to the package's
+# line-length/style gate.
+extend-exclude = ["swarm"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

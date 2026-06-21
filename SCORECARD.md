@@ -4,7 +4,7 @@
 
 **Repo:** dogfood-lab/ai-crucible
 **Date:** 2026-06-01
-**Type tags:** `[all]` `[pypi]` (Python library/framework — not CLI/MCP/desktop/npm)
+**Type tags:** `[all]` `[pypi]` `[cli]` `[npm]` (Python library/framework that also ships a thin `ai-crucible` CLI + an `@dogfood-lab/ai-crucible` npm launcher — corrected 2026-06-21; not MCP/desktop/vsix)
 
 ## Pre-Remediation Assessment
 

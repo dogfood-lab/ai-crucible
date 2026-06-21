@@ -14,8 +14,21 @@ from __future__ import annotations
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
-_USAGE = """\
-ai-crucible — a diagnostic measurement instrument (research preview, v0.2.0).
+
+def _version() -> str:
+    try:
+        return version("ai-crucible")
+    except PackageNotFoundError:  # running from a source tree without an install
+        return "0.0.0+local"
+
+
+def _usage() -> str:
+    """The usage banner. The version is read from package metadata — the SAME single source
+    as ``--version`` (models-cli-004), so the banner never drifts from the installed version
+    on the next bump (the old banner hardcoded ``v0.2.0`` while ``--version`` read metadata).
+    """
+    return f"""\
+ai-crucible — a diagnostic measurement instrument (research preview, v{_version()}).
 
 Seats a cross-family panel of local LLM judges under a sealed measurement boundary and
 scores attempts against a hidden oracle. NOTE: the judge panel's alt-test ω is still a
@@ -34,19 +47,12 @@ options:
 """
 
 
-def _version() -> str:
-    try:
-        return version("ai-crucible")
-    except PackageNotFoundError:  # running from a source tree without an install
-        return "0.0.0+local"
-
-
 def main(argv: list[str] | None = None) -> int:
     """Dispatch ``argv`` to a subcommand. Returns a process exit code."""
     argv = list(sys.argv[1:] if argv is None else argv)
 
     if not argv or argv[0] in ("-h", "--help"):
-        sys.stdout.write(_USAGE)
+        sys.stdout.write(_usage())
         return 0
     if argv[0] in ("-V", "--version"):
         sys.stdout.write(f"ai-crucible {_version()}\n")
@@ -60,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return characterize_main(rest)
 
-    sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_USAGE}")
+    sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
 
 

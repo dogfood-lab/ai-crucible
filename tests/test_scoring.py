@@ -472,6 +472,40 @@ def test_critical_flavor_constant_is_adversarial() -> None:
     assert CRITICAL_FLAVOR is GoodhartFlavor.ADVERSARIAL
 
 
+def test_grade_stamps_novelty_validated_true(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-stats-003 (RED→GREEN): grade() must self-describe its novelty
+    verdict via ``metadata['novelty_validated']`` so observability._is_novel can
+    read it off the oracle score. Previously grade() recorded novelty only as
+    ``components['novelty']`` (a numeric bonus) and never the boolean key, so the
+    leaderboard novelty-rate read 0 off any attempt scored without a panel."""
+    outcome = _clean_outcome(novelty_claimed=True, novelty_validated=True)
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["novelty_validated"] is True
+
+
+def test_grade_novelty_validated_false_without_claim(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-stats-003: the key is ``claimed AND validated`` — an unclaimed
+    (or unvalidated) novelty stamps False, matching the bonus-eligibility rule."""
+    # validated but not claimed -> no novelty
+    s1 = grade(
+        scoring_attempt,
+        scoring_meta,
+        _clean_outcome(novelty_claimed=False, novelty_validated=True),
+    )
+    assert s1.metadata["novelty_validated"] is False
+    # claimed but not validated -> no novelty (and the gate also closes)
+    s2 = grade(
+        scoring_attempt,
+        scoring_meta,
+        _clean_outcome(novelty_claimed=True, novelty_validated=False),
+    )
+    assert s2.metadata["novelty_validated"] is False
+
+
 # --------------------------------------------------------------------------- #
 # judge_panel — EXTERNAL_VERIFIER exclusion + reducers
 # --------------------------------------------------------------------------- #
@@ -545,6 +579,83 @@ def test_panel_raises_when_all_judges_excluded(
     )
     with pytest.raises(ValueError, match="no eligible judges"):
         asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_excludes_case_variant_same_family(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (RED→GREEN): EXTERNAL_VERIFIER exclusion must normalize
+    the family label (casefold + strip) on BOTH sides. A generator tagged
+    'claude' MUST drop a judge tagged 'Claude' (or '  CLAUDE ') — a casing/
+    whitespace drift in the family vocabulary previously let a same-family judge
+    vote on its own family's output, the exact self-preference bias §10.2 exists
+    to structurally prevent."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("Claude", True),   # same family, capitalized — MUST drop
+            make_judge("  CLAUDE ", True),  # same family, padded+upper — MUST drop
+            make_judge("qwen", False),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["eligible_count"] == 1  # only qwen survives
+    assert result.metadata["votes"] == [False]
+
+
+def test_panel_none_family_never_equals_concrete(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (contract): a None-family (untagged) judge never equals
+    any concrete generator family — it is admitted as cross-family on operator
+    responsibility, and recorded in ``untagged_judges_seated`` so the operator
+    can SEE it was seated on trust (it cannot be PROVEN cross-family)."""
+    untagged = make_judge(None, True)
+    untagged.model_id = "mystery-model:32b"  # type: ignore[attr-defined]
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # claude dropped, untagged admitted as cross-family-on-trust
+    assert result.metadata["eligible_count"] == 1
+    assert "mystery-model:32b" in result.metadata["untagged_judges_seated"]
+
+
+def test_panel_strict_cross_family_excludes_untagged(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (strict flag): the optional ``strict_cross_family`` flag
+    (default False, preserving panel-emptying semantics) excludes None-family
+    judges that cannot be PROVEN cross-family. Here it empties the panel, routing
+    through the existing empty-panel ValueError."""
+    untagged = make_judge(None, True)
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+        strict_cross_family=True,
+    )
+    with pytest.raises(ValueError, match="no eligible judges"):
+        asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_strict_cross_family_default_keeps_untagged(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (default preserved): with the flag OFF (default), an
+    untagged judge is still admitted — the existing panel-emptying semantics for
+    the all-same-family case are unchanged."""
+    untagged = make_judge(None, True)
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["eligible_count"] == 1
 
 
 def test_panel_median_reducer(scoring_attempt: AttemptState) -> None:

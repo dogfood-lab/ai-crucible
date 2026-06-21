@@ -508,14 +508,37 @@ def build_profile(
         notes.append("ECE not measured (no confidences) — no calibration penalty (§12)")
 
     # --- §11.1 #6 bias panel (position / verbosity / family-pref) ---
-    pos_b = M.position_bias(records)
-    verb_b = M.verbosity_bias(records)
-    fam_d = M.family_pref_delta(records)
-    bias_ok = m.max_bias < g.bias_ceiling
-    notes.append(
-        f"bias: position {pos_b:.3f}, verbosity {verb_b:.3f}, family-pref Δ {fam_d:+.3f}"
-        f" → max {m.max_bias:.3f} ({'<' if bias_ok else '≥'} {g.bias_ceiling:.2f} ceiling)"
+    # characterize-001 (honesty): the bias panel is structurally INERT unless the run staged
+    # bias trials — position-swap (``position``), verbosity (``metadata["answer_len"]``), or
+    # family-preference (``metadata["judged_family"]`` + ``metadata["judge_family"]``). The
+    # default run stages NONE of these, so the three metrics are definitionally 0.0. Mirror
+    # the consistency/ECE "not measured" branches rather than formatting three zeros as a
+    # PASSING measured gate (which a reviewer/JSON consumer would read as "this judge has no
+    # position/verbosity/self-preference bias" — a clean measurement the instrument never
+    # took). Honesty-only: NO bias trials are fabricated; an unmeasured panel sets the
+    # JudgeProfile bias fields to None so 0.0 cannot be misread as "measured, unbiased".
+    bias_measured = (
+        any(r.position is not None for r in records)
+        or any("answer_len" in r.metadata for r in records)
+        or any(
+            "judged_family" in r.metadata and "judge_family" in r.metadata for r in records
+        )
     )
+    if bias_measured:
+        pos_b = M.position_bias(records)
+        verb_b = M.verbosity_bias(records)
+        fam_d = M.family_pref_delta(records)
+        bias_ok = m.max_bias < g.bias_ceiling
+        notes.append(
+            f"bias: position {pos_b:.3f}, verbosity {verb_b:.3f}, family-pref Δ {fam_d:+.3f}"
+            f" → max {m.max_bias:.3f} ({'<' if bias_ok else '≥'} {g.bias_ceiling:.2f} ceiling)"
+        )
+    else:
+        pos_b = verb_b = fam_d = None
+        notes.append(
+            "bias not measured (no position-swap / verbosity / family trials staged) — "
+            "no bias penalty (the default run stages no bias trials)"
+        )
 
     # --- §12 continuous quality score + selective CI decision ---
     decision, review_flag, quality = _decide_from_metrics(m, human_human_kappa, g)

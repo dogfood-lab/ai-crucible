@@ -1080,7 +1080,15 @@ def family_pref_delta(records: list[JudgmentRecord]) -> float:
         if judged is None or own is None:
             continue
         acc = 1.0 if _is_correct(r) else 0.0
-        (same if judged == own else diff).append(acc)
+        # Normalize both family labels (casefold + strip) before bucketing: the
+        # judged-output tag and the judge's own tag are stamped by independent
+        # sites, so a casing/whitespace drift ("Qwen" vs "qwen") must NOT split a
+        # same-family pair into `diff` and silently mask the kin-bias this metric
+        # exists to surface. Sibling of the EXTERNAL_VERIFIER exclusion fix in
+        # scoring.judge_panel._norm_family (the SHARED FAMILY CONTRACT — every
+        # same-family comparison normalizes; §3 / scoring-stats-002).
+        same_family = str(judged).casefold().strip() == str(own).casefold().strip()
+        (same if same_family else diff).append(acc)
 
     if not same or not diff:
         return 0.0

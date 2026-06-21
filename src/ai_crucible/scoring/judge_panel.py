@@ -17,7 +17,10 @@ Command-R, via ollama-intern + RTX 5090 — §8.6). Here, in Phase 1, judges are
 runtime. Each judge is a ``Callable[[AttemptState], Awaitable[Score]]``; its model
 family is read from a ``family`` attribute on the callable (set by the kernel when
 it wires a model into a judge), falling back to ``None`` (treated as "unknown
-family", never excluded — an untagged judge is assumed external).
+family", never excluded — an untagged judge is admitted as external on the
+operator's responsibility, since it cannot be *proven* cross-family; the family
+comparison is casefold/strip-normalized so a casing drift cannot smuggle a
+same-family judge through, scoring-stats-002).
 
 Aggregation is a reducer (PoLL pattern): ``"majority"`` vote for boolean/discrete
 verdicts, ``"median"`` for numeric scores (median is the robust central estimate
@@ -64,8 +67,44 @@ def judge_family(judge: JudgeFn) -> str | None:
     *external* — family, so it is never excluded. This keeps the exclusion rule
     conservative: we only drop a judge we can *prove* shares the generator's
     family.
+
+    An untagged family MUST be Python ``None`` — never a colliding sentinel
+    string like ``"unknown"`` (the SHARED FAMILY CONTRACT: a colliding literal
+    would make two genuinely-distinct untagged models compare *equal* and silently
+    weaken EXTERNAL_VERIFIER exclusion; the CLI stamp in characterize/run.py yields
+    ``None`` for an untagged ``--models`` entry, scoring-stats-002 cluster).
     """
     return getattr(judge, "family", None)
+
+
+def _norm_family(family: str | None) -> str | None:
+    """Canonicalize a family label for comparison: ``casefold() + strip()``.
+
+    EXTERNAL_VERIFIER exclusion compares the generator's family against each
+    judge's family. The labels are set by two independent tag sites (the kernel's
+    generator tag and a seat's ``family``), so a casing/whitespace drift —
+    ``"Claude"`` vs ``"claude"`` vs ``"  CLAUDE "`` — would let a same-family judge
+    survive a raw string inequality and vote on its own family's output (the exact
+    self-preference bias §10.2 prevents). Normalizing both sides closes that drift
+    (scoring-stats-002). ``None`` (untagged) is returned unchanged: it never equals
+    any concrete family, so an untagged judge is never *proven* same-family.
+    """
+    return family.casefold().strip() if family is not None else None
+
+
+def judge_model_id(judge: JudgeFn) -> str:
+    """Best-effort human-readable id for a judge, for audit metadata.
+
+    Reads a ``model_id`` attribute (set by the kernel / :func:`weighted_judge`)
+    when present, else falls back to the callable's ``__name__``. Used only to
+    populate the ``untagged_judges_seated`` audit list (scoring-stats-002) so the
+    operator can SEE which untagged (None-family) judge was admitted on trust; it
+    never participates in exclusion.
+    """
+    mid = getattr(judge, "model_id", None)
+    if isinstance(mid, str) and mid:
+        return mid
+    return getattr(judge, "__name__", repr(judge))
 
 
 def weighted_judge(judge: JudgeFn, weight: float, *, family: str | None = None) -> JudgeFn:
@@ -97,6 +136,9 @@ def weighted_judge(judge: JudgeFn, weight: float, *, family: str | None = None) 
         return score
 
     _weighted.family = family if family is not None else judge_family(judge)  # type: ignore[attr-defined]
+    # Carry the inner judge's model id through the wrapper so the audit metadata
+    # (untagged_judges_seated, scoring-stats-002) can name a seated judge.
+    _weighted.model_id = judge_model_id(judge)  # type: ignore[attr-defined]
     return _weighted
 
 
@@ -231,9 +273,15 @@ class JudgePanel:
         reducer: aggregation method passed to :func:`reduce_scores` —
             ``"majority"`` (default) or ``"median"``.
         generator_family: the family of the model that produced the attempt being
-            judged. Judges of this family are excluded. ``None`` disables
-            exclusion (no generator family known → no judge can be proven to
-            share it).
+            judged. Judges of this family are excluded (case/whitespace-normalized
+            comparison — ``"Claude"`` matches ``"claude"``, scoring-stats-002).
+            ``None`` disables exclusion (no generator family known → no judge can
+            be proven to share it).
+        strict_cross_family: when ``True``, also exclude *untagged* (None-family)
+            judges that cannot be PROVEN cross-family — they are admitted by
+            default (``False``) on operator responsibility (see
+            :meth:`eligible_judges`). Default ``False`` preserves the existing
+            panel-emptying semantics (an all-untagged panel still scores).
     """
 
     def __init__(
@@ -241,10 +289,13 @@ class JudgePanel:
         judges: list[JudgeFn],
         reducer: str = "majority",
         generator_family: str | None = None,
+        *,
+        strict_cross_family: bool = False,
     ) -> None:
         self.judges = judges
         self.reducer = reducer
         self.generator_family = generator_family
+        self.strict_cross_family = strict_cross_family
 
     @classmethod
     def from_seated(
@@ -253,6 +304,7 @@ class JudgePanel:
         judge_for: Callable[[str], JudgeFn],
         *,
         generator_family: str | None = None,
+        strict_cross_family: bool = False,
     ) -> JudgePanel:
         """Build a reliability-weighted panel from a composed :class:`SeatedPanel`.
 
@@ -272,27 +324,64 @@ class JudgePanel:
             panel: the composed :class:`SeatedPanel` (its ``seats`` are instantiated).
             judge_for: maps a seated ``model_id`` to a concrete judge callable.
             generator_family: the attempt's generator family (excluded judges, §10.2).
+            strict_cross_family: forwarded to the panel — exclude None-family seats
+                (default ``False``; see :meth:`eligible_judges`).
 
         Returns:
             A :class:`JudgePanel` with the seated judges, ``"weighted"`` reducer.
         """
-        judges = [
-            weighted_judge(
+        judges = []
+        for seat in panel.seats:
+            wrapped = weighted_judge(
                 judge_for(seat.model_id), seat.reliability_weight, family=seat.family
             )
-            for seat in panel.seats
-        ]
-        return cls(judges=judges, reducer="weighted", generator_family=generator_family)
+            # Carry the seat's model id onto the wrapper so an untagged seat is
+            # nameable in untagged_judges_seated (scoring-stats-002).
+            wrapped.model_id = seat.model_id  # type: ignore[attr-defined]
+            judges.append(wrapped)
+        return cls(
+            judges=judges,
+            reducer="weighted",
+            generator_family=generator_family,
+            strict_cross_family=strict_cross_family,
+        )
 
     def eligible_judges(self) -> list[JudgeFn]:
         """The judges that will actually vote — generator-family judges removed.
 
-        Exclusion only fires when ``generator_family`` is set *and* a judge's
-        family equals it. Untagged judges (family ``None``) are always kept.
+        Exclusion fires when ``generator_family`` is set *and* a judge's family
+        equals it under a **normalized** (``casefold() + strip()``) comparison, so
+        a casing/whitespace drift in the family vocabulary — ``"Claude"`` vs
+        ``"claude"`` vs ``"  CLAUDE "`` — can no longer let a same-family judge
+        survive (scoring-stats-002).
+
+        **The honest residual on untagged judges.** A judge whose family is
+        ``None`` (untagged) is admitted as cross-family **on the operator's
+        responsibility** — it CANNOT be *proven* cross-family, so we do not silently
+        drop it (that would over-exclude), but we also cannot certify it is not the
+        generator's own family. :meth:`score` records every admitted untagged judge
+        in ``untagged_judges_seated`` so this trust assumption is visible, not
+        hidden. Set ``strict_cross_family=True`` to exclude None-family judges
+        instead (routing an emptied panel through the §3 empty-panel ``ValueError``);
+        the default ``False`` preserves the existing panel-emptying semantics.
         """
         if self.generator_family is None:
+            # No generator family known → nothing can be proven to share it. Even
+            # in strict mode there is no concrete family to exclude against.
             return list(self.judges)
-        return [j for j in self.judges if judge_family(j) != self.generator_family]
+
+        gen = _norm_family(self.generator_family)
+        eligible: list[JudgeFn] = []
+        for j in self.judges:
+            fam = _norm_family(judge_family(j))
+            if fam is None:
+                # Untagged: admitted unless strict mode excludes the unprovable.
+                if not self.strict_cross_family:
+                    eligible.append(j)
+                continue
+            if fam != gen:
+                eligible.append(j)
+        return eligible
 
     async def score(self, attempt: AttemptState) -> Score:
         """Run the eligible judges concurrently and reduce to a panel score.
@@ -303,8 +392,10 @@ class JudgePanel:
         Returns:
             The reduced panel :class:`~ai_crucible.types.Score`. Its ``metadata``
             additionally records ``generator_family``, ``excluded`` (the families
-            dropped for sharing the generator family), ``eligible_count``, and the
-            aggregated novelty verdict ``novelty_validated`` (+ the per-judge
+            dropped for sharing the generator family, normalized), ``eligible_count``,
+            ``untagged_judges_seated`` (model ids of admitted None-family judges —
+            seated on operator trust, not proven cross-family, scoring-stats-002),
+            and the aggregated novelty verdict ``novelty_validated`` (+ the per-judge
             ``novelty_votes``) — the panel is the novelty authority (§8.7) and the
             kernel feeds this verdict into the oracle gate, never the Solver's or
             oracle_runner's self-report.
@@ -328,19 +419,28 @@ class JudgePanel:
         scores = await asyncio.gather(*(judge(attempt) for judge in eligible))
 
         panel = reduce_scores(list(scores), self.reducer)
+        gen = _norm_family(self.generator_family)
         excluded = sorted(
             {
                 fam
                 for j in self.judges
                 if (fam := judge_family(j)) is not None
-                and fam == self.generator_family
+                and _norm_family(fam) == gen
             }
         )
+        # The honest residual (scoring-stats-002): list the untagged (None-family)
+        # judges that VOTED — admitted as cross-family on operator responsibility,
+        # since they cannot be proven cross-family. Surfacing the ids keeps the
+        # trust assumption visible rather than hidden behind a clean panel verdict.
+        untagged_seated = [
+            judge_model_id(j) for j in eligible if judge_family(j) is None
+        ]
         panel.metadata.update(
             {
                 "generator_family": self.generator_family,
                 "excluded": excluded,
                 "eligible_count": len(eligible),
+                "untagged_judges_seated": untagged_seated,
             }
         )
         return panel

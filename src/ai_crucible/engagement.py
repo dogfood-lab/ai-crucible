@@ -132,15 +132,38 @@ def _chrome_tokens(chrome: Chrome) -> list[str]:
     return tokens
 
 
+def _message_text(message: dict) -> list[str]:
+    """Every string a message could leak chrome through — ALL its string-valued
+    fields, not just ``content``.
+
+    The scored context is NOT uniform-shaped: the Solver appends
+    ``{role, content}`` messages, but the Critic appends
+    ``{role, critique, anonymized}`` (roles.py ``Critic.message``) — its
+    model-produced text lives under ``critique``, with no ``content`` key. Scanning
+    only ``content`` left an entire class of scored-context message unscanned, so a
+    chrome value in a critique bypassed both the role guard and the kernel
+    re-check. We therefore mirror :func:`_stringify`'s value-walk and collect every
+    string leaf of every field value — content, critique, or any future
+    message-mutating site's key — so the boundary check covers the whole message
+    however its text was carried. Scanning the ``role`` label value too is harmless
+    (it can at worst match a generic word, never a leaked chrome value).
+    """
+    texts: list[str] = []
+    for value in message.values():
+        texts.extend(_stringify(value))
+    return texts
+
+
 def assert_no_chrome_leak(messages: list[dict], chrome: Chrome) -> None:
     """THE LOAD-BEARING GUARD — raise if Tier-3 chrome appears in scored context.
 
-    Walks every message's ``content`` and raises :class:`SealedBoundaryViolation`
-    if any non-empty chrome value (rank / cohort_size / leaderboard rows / catalog
-    standing, each rendered to its string tokens) is found as a substring of any
-    message content. This is the §10.1(d,e) sealed boundary made executable:
-    motivation lives in chrome, measurement context stays clean, and the two never
-    share a context window.
+    Walks every string-valued field of every message (``content``, the Critic's
+    ``critique``, or any other carried text — see :func:`_message_text`) and raises
+    :class:`SealedBoundaryViolation` if any non-empty chrome value (rank /
+    cohort_size / leaderboard rows / catalog standing, each rendered to its string
+    tokens) is found in any of them. This is the §10.1(d,e) sealed boundary made
+    executable: motivation lives in chrome, measurement context stays clean, and
+    the two never share a context window.
 
     Matching is **word-boundary** on the rendered string form, so it catches a
     leak however the value was interpolated into a prompt (``f"rank {chrome.rank}"``,
@@ -172,17 +195,20 @@ def assert_no_chrome_leak(messages: list[dict], chrome: Chrome) -> None:
         return  # nothing populated → nothing can leak.
 
     for index, message in enumerate(messages):
-        content = message.get("content", "")
-        if not isinstance(content, str):
-            content = str(content)
-        for token in tokens:
-            # Word-boundary match: catches the token however it was interpolated,
-            # but not as an incidental substring of a larger token/number.
-            if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", content):
-                role = message.get("role", "?")
-                raise SealedBoundaryViolation(
-                    f"Tier-3 chrome value {token!r} leaked into scored context "
-                    f"(message[{index}], role={role!r}). Motivation must stay in "
-                    f"chrome; the scored context must remain deployment-shaped and "
-                    f"framing-neutral (research-grounding §10.1(d,e))."
-                )
+        # Scan EVERY string-valued field, not only ``content`` — the Critic's text
+        # rides in ``critique`` (no ``content`` key), so a content-only scan left
+        # that scored-context field unguarded (and the kernel post-Critic re-check
+        # inherited the blind spot). The value-walk mirrors :func:`_stringify`.
+        for content in _message_text(message):
+            for token in tokens:
+                # Word-boundary match: catches the token however it was
+                # interpolated, but not as an incidental substring of a larger
+                # token/number.
+                if re.search(rf"(?<!\w){re.escape(token)}(?!\w)", content):
+                    role = message.get("role", "?")
+                    raise SealedBoundaryViolation(
+                        f"Tier-3 chrome value {token!r} leaked into scored context "
+                        f"(message[{index}], role={role!r}). Motivation must stay "
+                        f"in chrome; the scored context must remain deployment-"
+                        f"shaped and framing-neutral (research-grounding §10.1(d,e))."
+                    )
