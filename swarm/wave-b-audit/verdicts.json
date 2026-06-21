@@ -1,0 +1,594 @@
+{
+ "panel": [
+  "deepseek-v4-pro:cloud",
+  "qwen3-coder:480b-cloud",
+  "glm-5:cloud",
+  "kimi-k2.6:cloud",
+  "gpt-oss:120b-cloud"
+ ],
+ "n_findings": 22,
+ "verdicts": [
+  {
+   "id": "kernel-runtime-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code indeed lacks try/except around oracle_runner and panel.score, so an exception there propagates and discards the attempt without trace. This is a robustness gap, not a measurement misreport or boundary breach; the operator sees a traceback, so it's not silent data loss. Severity inflated from HIGH to MEDIUM.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that post-Solver pipeline failures (oracle_runner, panel.score) are not wrapped in exception handling, leading to loss of completed work and no diagnostic trace. This directly violates graceful degradation expectations for a measurement instrument and can be triggered by network issues or judge daemon failures.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms bare await calls on external dependencies (oracle_runner, panel.score) with no try/except wrapping—network blips or Ollama daemon errors during grading would propagate raw exceptions, discarding expensive Solver output with no eval_log written. This is silent data loss of costly compute in a measurement instrument, meeting the HIGH bar for unrecoverable state.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "kernel-runtime-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that asyncio.gather without return_exceptions=True will propagate any single judge failure, causing the entire panel to fail rather than allowing partial results from functioning judges. This directly impacts measurement reliability in cross-family panels where redundancy is intended to provide fault tolerance, and a single flaky judge can indeed cause complete panel failure.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "kernel-runtime-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code unconditionally reads entire files into memory via read_text() with no size cap—this is a real gap at the puzzle input boundary. MEDIUM is correct because OOM crashes the kernel visibly before measurement starts; it doesn't leak oracle data, flip verdicts, or compromise sealed boundaries.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "kernel-runtime-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "false_positive",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "no",
+     "reasoning": "The hard-kill threshold requires three identical calls to fire; when the tool-call budget is smaller than that window, BUDGET is the correct termination reason because the attempt exhausts resources before a loop is established. The check ordering correctly prioritizes the kill condition over budget exhaustion, so the trace is accurately attributed and no diagnosability gap exists.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 0,
+    "false_positive": 1,
+    "uncertain": 0,
+    "verdict": "false_positive",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "kernel-runtime-005",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code indeed emits a dict without a version tag, which could cause silent misinterpretation if Inspect or downstream consumers change their schema. An upgrade to a newer Inspect release could realistically trigger the issue, impacting measurement correctness.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "scoring-numerics-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "asyncio.gather without return_exceptions=True discards all other judges' results if one raises, causing total loss of panel verdict and potential measurement misreport; realistic with local Ollama models.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that `asyncio.gather` without `return_exceptions=True` will abort the entire panel scoring if any single judge raises, which is a realistic failure mode given the described use of local models via Ollama that can timeout or crash. This directly impacts the measurement instrument's reliability by discarding valid results from functioning judges, violating the expected robustness of a multi-judge panel.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "asyncio.gather defaults to return_exceptions=False, so any single judge exception propagates immediately and discards all other completed results. In Phase 2 with local Ollama models, timeouts/OOMs are realistic failure modes, and losing 2 of 3 successful judge verdicts due to 1 failure breaks the panel's core robustness promise and causes silent measurement data loss.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-numerics-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that `statistics.median` with NaN values produces order-dependent results due to NaN not having a total order, and this propagates silently into the final score. This directly impacts measurement integrity by making panel scores non-reproducible and potentially misleading when used in comparisons or leaderboards.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-numerics-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "Python NaN comparisons are universally False, so NaN solve_quality/time_used bypass all threshold checks and yield gate_passed=True with failed_conditions=[]. The persistence layer catches the non-finite value, but the in-memory Score propagates NaN to any downstream aggregation before that rejection occurs.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "characterize-degradation-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The report indeed omits failed models, making a partial panel indistinguishable from a smaller-by-design panel. This is a real observability gap, but it does not directly flip a verdict or leak the oracle; it is a metadata completeness issue, so severity is MEDIUM rather than HIGH.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding accurately describes a silent data loss issue where failed models are completely omitted from the report with no trace except stdout, which is not persisted. This directly violates the measurement instrument's integrity by allowing partial panel results to appear as if they met quorum, potentially misleading downstream consumers about the actual cross-family diversity achieved.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The exception handler catches per-model failures, prints to stdout (not captured), evicts, and continues—never recording the attempted model in all_records or the final report. A partial panel thus appears indistinguishable from a smaller-by-design panel, silently breaking the cross-family diversity guarantee that the external-verifier panel exists to enforce.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "characterize-degradation-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code lacks per-item exception handling, so any judge_item exception aborts the whole collection causing loss of all previously gathered records, which is a realistic failure mode. This silent, unrecoverable loss of valid measurement data justifies a HIGH severity.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "characterize-degradation-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code accumulates all records in memory and writes only at the end; a crash before that loses all work. This is a real robustness gap, triggerable by common failures, and severity MEDIUM is appropriate as it wastes resources but does not corrupt measurement integrity.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "characterize-degradation-004",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code clearly implements a fallback that scores unparseable outputs as wrong (1 - gold_num) without tracking or reporting the parse failure rate, which directly supports the claimed measurement bias. This creates a realistic path where format drift or model non-compliance is invisibly conflated with genuine performance failure, potentially misrepresenting model capability in the final report.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "characterize-degradation-005",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code evidence clearly shows a bare `await model.judge_item(...)` with no timeout wrapper or retry logic. Ollama daemon stalls during model swap/evict churn are a realistic failure mode on resource-constrained setups. LOW is appropriate since this causes wasted wall-clock and potential model drops but does not corrupt measurement data, breach sealed boundaries, or flip verdicts.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "models-ollama-resilience-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The httpx excerpt confirms a single unwrapped POST with no retry, so transient connection resets or 503s during long local-LLM runs propagate immediately. Because the harness catches exceptions at whole-model granularity, one such blip discards all prior records for that model, but the failure is observable and bounded to one panel member, making MEDIUM severity appropriately calibrated.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "models-ollama-resilience-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The adapter propagates raw httpx.ConnectError without wrapping, which occurs when Ollama daemon is down or host misconfigured—a realistic scenario. Impact is limited to poorer error legibility for direct callers, not a security or measurement breach.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "models-ollama-resilience-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The adapter's _via_httpx path calls r.json() without try/except and downstream code assumes a dict; a proxy returning HTML 200 or a non-object JSON would cause an opaque error. This is a realistic defensive gap, and MEDIUM severity fits because it only degrades error clarity for one model run, not measurement integrity.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "models-ollama-resilience-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that `dict(resp)` assumes the SDK response is iterable in a key-value manner, which is not guaranteed across SDK versions or object types. A future SDK change could indeed cause a `TypeError`, and while it's not a silent failure, it directly impacts the measurement instrument's ability to function with external dependencies, warranting at least MEDIUM severity due to operational fragility and misleading error messaging.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "instrument-future-deps-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "Python's max(NaN, x) returns x because NaN comparisons are False, so NaN Sobol indices are silently converted to 0.0 and misinterpreted as 'no effect'. A surrogate model_fn returning NaN/inf for edge parameter regions (log(0), 0/0, empty samples) is realistic, and the absence of np.isfinite guard means this produces no diagnostic—just a frozen weight with no explanation.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "instrument-future-deps-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The unbounded pin and wholesale model_dump are real, but this is intentional delegation to the installed inspect-ai version; it does not breach the sealed measurement boundary, corrupt grading, or flip a verdict—worst realistic impact is downstream artifact-parsing friction, making it a maintainability issue rather than a measurement-integrity defect.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "instrument-future-deps-003",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code overwrites duplicate keys without detection, and a manually edited SUT.yaml can reliably trigger this. Mis‑reading the pinned model can flip audit outcomes, a high‑impact measurement error.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "instrument-future-deps-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code uses str.isdigit() which accepts non-ASCII digits (e.g., ١, ²), so a model id containing one would be misclassified as exact, bypassing the guardrail. Triggerable only with deliberately crafted or copy-pasted non-ASCII strings, and the module already labels this a heuristic guardrail, so LOW severity is appropriate.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "instrument-future-deps-005",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence shows unbounded file reading via `file.read_text()` with no size limits, and the description confirms this can lead to memory exhaustion. For a measurement instrument, this resource exhaustion could cause unrecoverable state or silent data loss during calibration loading, which violates measurement integrity. The LOW severity is unjustified because resource exhaustion in a core loading path of a diagnostic instrument can effectively break measurement reliability.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  }
+ ]
+}

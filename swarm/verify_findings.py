@@ -172,7 +172,8 @@ def main(path):
         findings = json.load(f)
     if isinstance(findings, dict):
         findings = findings.get("findings", [])
-    out_path = os.path.join(HERE, "wave-a-audit", "verdicts.json")
+    # verdicts land next to the findings file (per-wave: wave-a-audit/, wave-b-audit/, ...).
+    out_path = os.path.join(os.path.dirname(os.path.abspath(path)), "verdicts.json")
     prior = {}
     if os.path.exists(out_path) and not FORCE:
         with open(out_path, "r", encoding="utf-8") as f:
