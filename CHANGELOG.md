@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Dogfood-swarm hardening + the first runnable diagnostic cycle (2026-06-21). Every
-change cross-family-verified (Ollama Cloud panel) and test-first; suite **473 → 677**
-tests, **91.5% → 94.5%** coverage. Pre-1.0 research preview unchanged.
+Dogfood-swarm hardening + the first runnable diagnostic cycle + the durable catalog
+(2026-06-21). Every change cross-family-verified (Ollama Cloud panel) and test-first;
+suite **473 → 783** tests, **91.5% → 94.6%** coverage. Pre-1.0 research preview unchanged.
 
 ### Added
+- **Durable catalog + graduation lifecycle + differential typology (Epic 4)** — the
+  instrument now ACCUMULATES across runs. `ai-crucible run` appends each cycle to an
+  event-sourced, hash-chained catalog log (the source of truth); tier state
+  (Lab→Arena→Regression) is a derived projection folded from it (never mutated in place).
+  New `ai-crucible catalog {list|show|graduate}` reads + curates it. Graduation is
+  three-valued and abstention-aware — it PROMOTES only on a confident cross-family
+  fairness verdict, HOLDS on a confident negative, and **DEFERS to the Designer** otherwise
+  (the honest posture while no confident fairness panel exists; ω on ice). Saturation uses
+  an anytime-valid e-process with a Schmitt-trigger dwell + frontier gate (anti-flapping,
+  demote-not-delete). The **differential typology** classifies each puzzle Claude-specific
+  gap / LLM-general / Claude-strength / inconclusive off the Newcombe-1998 delta CI (not
+  interval overlap), with BH-FDR across the catalog — the diagnostic payoff. Study-swarm-
+  grounded + the graduation math & differential cross-family-verified (Newcombe 1998;
+  Howard/Ramdas/McAuliffe/Sekhon 2021 confidence sequences; Jung et al. ICLR 2025
+  Trust-or-Escalate; Verga et al. 2024 PoLL; SWE-bench Verified; Benjamini-Hochberg 1995).
 - **The instrument RUNS** — `ai-crucible run <puzzle> --model <id>[@family] --k N`
   executes a real Solver against a puzzle in the sandbox and grades it out-of-band via
   the puzzle's sealed `oracle/check.py`, emitting the `pass^k` / Wilson rollup. New

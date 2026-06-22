@@ -259,6 +259,11 @@ class RunRecord:
     started_at: str      # ISO 8601 (injected at the edge; pinned in tests)
     finished_at: str
     nonce: str           # disambiguates two otherwise-identical runs
+    # The puzzle's pass^k floor (PuzzleMeta.min_k), recorded so the catalog is
+    # SELF-CONTAINED for graduation/saturation — the demote floor (3·min_k) is
+    # recoverable from the log alone, without the puzzle files still being present.
+    # Not part of run_id (idempotency is unaffected by recording it).
+    min_k: int = 10
     schema_version: int = CATALOG_SCHEMA_VERSION
     rule_version: str = ""
     provenance_level: int = 1   # 1 = hash-chain-only (SLSA~L1); 2 = cosign-signed (honest)
@@ -290,6 +295,7 @@ class RunRecord:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "nonce": self.nonce,
+            "min_k": self.min_k,
             "schema_version": self.schema_version,
             "rule_version": self.rule_version,
             "provenance_level": self.provenance_level,
@@ -314,6 +320,7 @@ class RunRecord:
             started_at=d.get("started_at", ""),
             finished_at=d.get("finished_at", ""),
             nonce=d.get("nonce", ""),
+            min_k=int(d.get("min_k", 10)),
             schema_version=int(d.get("schema_version", CATALOG_SCHEMA_VERSION)),
             rule_version=d.get("rule_version", ""),
             provenance_level=int(d.get("provenance_level", 1)),

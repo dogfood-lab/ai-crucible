@@ -1,0 +1,154 @@
+{
+ "panel": [
+  "deepseek-v4-pro:cloud",
+  "qwen3-coder:480b-cloud",
+  "glm-5:cloud"
+ ],
+ "verdicts": [
+  {
+   "id": "newcombe-diff-ci",
+   "consensus": "correct",
+   "correct": 2,
+   "incorrect": 1,
+   "verdicts": [
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The code exactly implements Newcombe-1998 method 10 (MOVER combination of two Wilson score intervals). The lower bound uses (p1 - l1) and (u2 - p2) correctly, and the upper bound uses (u1 - p1) and (p2 - l2) correctly, following the square-and-add principle. The resulting CI is a valid confidence interval for the difference, and testing zero exclusion is a sound alternative to the flawed interval-overlap heuristic.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "incorrect",
+     "confidence": "high",
+     "error_if_any": "The cross-terms in the interval calculation are incorrectly paired. Line 5 uses (p1-l1) with (u2-p2) for the lower bound, and line 6 uses (u1-p1) with (p2-l2) for the upper bound, which is backwards. The correct Newcombe method 10 should use the same Wilson margins for both bounds: lower = delta - sqrt((p1-l1)^2 + (p2-l2)^2) and upper = delta + sqrt((u1-p1)^2 + (u2-p2)^2).",
+     "reasoning": "The implemented formula incorrectly pairs the Wilson interval margins, using opposing tails (p1-l1 with u2-p2) instead of consistent tails. This produces an interval that is not equivalent to Newcombe's method 10, which correctly combines the same-side margins from both Wilson intervals. The current implementation could produce invalid intervals and does not match the MOVER (Method Of Variance Estimates Recovery) approach described in Newcombe 1998.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The Newcombe-1998 method-10 formula is correctly implemented: for the lower bound of p1-p2, it uses sqrt((p1-l1)² + (u2-p2)²) combining the lower Wilson bound of p1 with the upper Wilson bound of p2; for the upper bound, sqrt((u1-p1)² + (p2-l2)²) correctly pairs the upper bound of p1 with the lower bound of p2. The cross-terms are properly paired—lower bound uses conservative estimates (p1 minimized, p2 maximized), upper bound uses the opposite. Clamping to [-1,1] is appropriate since proportion differences cannot exceed this range. Excluding zero from this CI is a valid test of H0:p1=p2, unlike the invalid non-overlapping-intervals heuristic.",
+     "model": "glm-5"
+    }
+   ]
+  },
+  {
+   "id": "eprocess-validity",
+   "consensus": "correct",
+   "correct": 3,
+   "incorrect": 0,
+   "verdicts": [
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The per-run e-value is the likelihood ratio for p0 vs p1. Since p1 > p0, the ratio is monotone increasing in successes s, so for any p ≤ p0, E_p[E] = (p·p1/p0 + (1-p)·(1-p1)/(1-p0))^n ≤ 1^n = 1, making it a valid e-value for the composite null. The product across independent runs forms a test supermartingale, so optional stopping at e-value ≥ 1/α = 20 controls type-I error at α=0.05. Treating the run as the unit is equivalent to multiplying per-attempt e-values, so no flaw.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The likelihood ratio (p1/p0)^s * ((1-p1)/(1-p0))^(n-s) is a valid e-value for the simple null p=p0 vs alternative p=p1. For the composite null H0: p≤p0, the expected value E_p[E_run] ≤ 1 holds for all p≤p0 because the log-likelihood ratio is a convex function and achieves its maximum at p=p0. The product of these per-run e-values forms a test supermartingale under the null, ensuring validity at any stopping time. Treating each k-attempt run as a unit is appropriate since the e-value construction depends only on the sufficient statistics (s,n) per run.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The e-value E = (p1/p0)^s·((1-p1)/(1-p0))^(n-s) has expectation E_p[E] = [p·p1/p0 + (1-p)·(1-p1)/(1-p0)]^n. For p1 > p0, the derivative d/dp of the bracket is p1/p0 - (1-p1)/(1-p0) = 0.97/0.90 - 0.03/0.10 ≈ 0.78 > 0, so the function increases with p, meaning E_p[E] ≤ 1 for all p ≤ p0 (equality only at p = p0). The product of independent valid e-values forms a test supermartingale, guaranteeing P(E_τ ≥ 1/α) ≤ α at any stopping time τ. The additional stopping conditions (n_runs ≥ 2, total_n ≥ 3·min_k, is_frontier) are pre-visible and only strengthen type-I error control.",
+     "model": "glm-5"
+    }
+   ]
+  },
+  {
+   "id": "graduation-precedence",
+   "consensus": "correct",
+   "correct": 3,
+   "incorrect": 0,
+   "verdicts": [
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The if-elif-else chain enforces the stated precedence exactly: PROMOTE is reached only when claude_band_ok, cohort_nontrivial, fairness_ok, and not deferred all hold (the first two are enforced by earlier HOLD branches, the last two by the PROMOTE condition itself). HOLD triggers only on the three confident negatives (Claude band fail, cohort trivially aces, confident unfair). All other cases—including sub-quorum, escalating, fairness=None, or cohort_n==0—fall through to DEFER, never PROMOTE or HOLD. No input can reach PROMOTE without a confident 'fair' verdict, and no HOLD/PROMOTE occurs when DEFER is appropriate. Sub-quorum panels correctly defer, which is methodologically honest.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The logic correctly implements the stated precedence: PROMOTE only when all conditions including a confident 'fair' verdict are met (line 6), HOLD on confident negatives (lines 4-5), and DEFER_TO_DESIGNER otherwise (line 7). All paths are mutually exclusive and collectively exhaustive, with no input reaching PROMOTE without a confident 'fair' verdict. Routing sub-quorum panels to DEFER is methodologically honest as it avoids asserting confidence without sufficient evidence.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The code correctly implements the three-valued logic: PROMOTE requires all four clauses (claude_band_ok, cohort_nontrivial, fairness_ok with quorum+no-escalate+fair, not deferred), HOLD on confident negatives (Claude fails, cohort trivially aces, panel confidently unfair), and DEFER on any confidence gap. The stated property has a minor wording inconsistency—'no cohort solve evidence' is listed under 'lacks confident fairness verdict' but actually causes clause 2 to fail—yet the code correctly routes cohort_n==0 to DEFER. No input reaches PROMOTE without fairness_ok (which requires present+quorum+not escalate+fairness=='fair'), and sub-quorum panels correctly route to DEFER rather than asserting false confidence.",
+     "model": "glm-5"
+    }
+   ]
+  },
+  {
+   "id": "differential-classification",
+   "consensus": "correct",
+   "correct": 2,
+   "incorrect": 1,
+   "verdicts": [
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The directional logic correctly maps upper<0 to delta<0 (Claude underperforms) and lower>0 to delta>0 (Claude outperforms). Requiring both CI exclusion and |delta|>=0.30 is a sound design choice to filter trivial significant gaps. The LLM_GENERAL_GAP condition correctly requires non-exclusion of zero AND both Wilson uppers <=0.20, providing positive shared-failure evidence. Applying BH-FDR only to directional puzzles is appropriate because those are the only 'discoveries' being tested for multiplicity; non-directional categories are not directional claims.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "incorrect",
+     "confidence": "high",
+     "error_if_any": "Line 3: `directional = excludes_zero and abs(delta) >= 0.30` uses `abs(delta)` instead of the CI width or a correct MDE check; Line 4: `upper<0` implies `delta<0`, but delta is cohort-cohort, so this mislabels direction; Line 5: `lower>0` same issue; Line 6: shared-failure logic is backwards — both Wilson *uppers* ≤ 0.20 does not imply shared failure unless failures are being measured (should be *failures* low); BH-FDR scope is correct.",
+     "reasoning": "The directional condition `upper<0` should mean the CI is entirely below zero, implying Claude performs worse, but only if delta = claude - cohort. Here, the code does not clarify the order in delta computation. The use of `abs(delta) >= 0.30` is invalid for MDE checking — minimal detectable effect should be checked against standard error or CI width, not raw delta. Requiring both Wilson *uppers* ≤ 0.20 for 'LLM_GENERAL_GAP' is statistically unsound unless 'failure' rates are low — upper bounds on success rates do not indicate shared failure. BH-FDR is correctly scoped to directional tests only.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "Directional logic is correct: upper<0 means entire CI below zero, so delta<0, so Claude underperforms. Requiring both CI-excludes-zero AND |delta|>=mde_floor is sound practice combining statistical and practical significance. LLM_GENERAL_GAP correctly requires positive shared-failure evidence (both Wilson uppers ≤0.20) rather than mere null delta. BH-FDR applied only to directional claims is appropriate scope for FDR control. The Fisher p-value mention in stated_property appears to describe broader methodology not shown in this classification snippet.",
+     "model": "glm-5"
+    }
+   ]
+  },
+  {
+   "id": "benjamini-hochberg",
+   "consensus": "correct",
+   "correct": 3,
+   "incorrect": 0,
+   "verdicts": [
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The code correctly implements the Benjamini-Hochberg step-up procedure: it sorts p-values ascending, finds the largest rank k where p_(k) <= (k/m)*q, and then rejects all hypotheses with rank <= k. The ranking uses 1-based indexing with no off-by-one error, and the decision rule matches the standard BH algorithm exactly.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The code correctly implements the Benjamini-Hochberg step-up procedure. It finds the largest rank k where p_(k) <= (k/m)*q, then rejects all hypotheses with rank <= k. The 1-based ranking is correctly handled by using enumerate with start=1, and the step-up property is preserved by setting max_k to track the largest valid rank and then rejecting all hypotheses up to that rank.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "correct",
+     "confidence": "high",
+     "error_if_any": "",
+     "reasoning": "The implementation correctly follows BH (1995): argsort gives ascending order, enumerate with start=1 provides correct 1-based ranks, the first loop finds the largest k where p_(k) ≤ (k/m)q by iterating through all ranks and keeping the last satisfying value, and the second loop correctly rejects ALL hypotheses with rank ≤ max_k (not just those that individually passed the threshold). The step-up property is preserved: smaller p-values at ranks < max_k are rejected even if p_(j) > (j/m)q for some j < max_k, which is exactly the BH guarantee.",
+     "model": "glm-5"
+    }
+   ]
+  }
+ ]
+}
