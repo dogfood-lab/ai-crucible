@@ -1,0 +1,39 @@
+# Kickoff — ai-crucible: Epic 4 + finish the dogfood swarm
+
+*Paste into a fresh advisor/coordinator session. Self-contained.*
+
+You are the coordinator continuing a **dogfood swarm** on **`dogfood-lab/ai-crucible`** (local: `E:/AI/ai-crucible`; the old `E:/AI/dogfood-lab/crucible` path is dead). Read the dogfood-swarm skill + `C:/Users/mikey/.claude/projects/F--AI/memory/crucible.md` + `memory/cross-family-cloud-verification.md` first. Work on branch **`dogfood-swarm`** (already pushed, 14 commits ahead of `main`, CI green).
+
+## What ai-crucible IS (don't shrink it)
+A diagnostic adversarial game / **measurement instrument** for frontier LLMs — a thin policy layer on Inspect AI. A Designer crafts puzzles targeting real capability gaps; a Solver attempts them in a sandbox; a hidden oracle grades out-of-band; a cross-family judge panel validates novelty. The model under measurement is the primary adversary. Canon: `docs/research-grounding.md` (§-cited), `docs/gameplan.md`.
+
+## State at handoff (verify with `git log`, `bash verify.sh`)
+- **677 tests, 94.5% cov, 0 CRIT/0 HIGH.** Health pass A/B/C done; Epic 1 (the run path) done; Findings A+B done; Epic 2 (self-test + bypass suite) done. All committed + CI-green.
+- **The instrument RUNS:** `ai-crucible run <puzzle> --model <id>[@family] --k N` → live Solver → sandbox → out-of-band grade via the puzzle's sealed `oracle/check.py` → `pass^k`/Wilson rollup. Modules: `cycle.py`, `oracle_runner.py`, `staging.py`, `solver_loop.py`.
+- **Eval-integrity (Finding A):** a fabricated-but-correct answer CLOSES the §8.3 gate via a **penalty-adjusted-solve floor** (bonus-free, non-compensatory) in `scoring/oracle.py`.
+- **ω is ON ICE by structural constraint** — the alt-test needs ≥3 independent humans a one-human studio can't staff. **DO NOT build a human-labeling round or fake human grounding.** Seats stay provisional + escalate to the Designer; the instrument discloses this. (A future no-humans ω-self-circularity reduction via an independent cross-family CLOUD jury is a *candidate*, not a mandate.)
+
+## METHOD (non-negotiable — this is what made the swarm work)
+- **Greenfield build pattern:** Wave-0 contract lock (coordinator, committed to `swarm/epic-4/CONTRACT.md`) → parallel leaf agents (exclusive NEW-file ownership, contracts-only deps, test-first RED→GREEN) → integrator → composed re-audit + cross-family verify.
+- **Cross-family verify (EXTERNAL_VERIFIER):** verify load-bearing claims/designs/Claude-authored changes against a **non-Claude Ollama Cloud** family. 8-family roster live (probe first): `glm-5:cloud`, `deepseek-v4-pro:cloud`, `qwen3-coder:480b-cloud`, `kimi-k2.6:cloud`, `gpt-oss:120b-cloud`, `deepseek-v3.1:671b-cloud`, `minimax-m3:cloud`, `nemotron-3-ultra:cloud`. Reuse/adapt `swarm/verify_findings.py` (the `_norm` guard strips BOTH `:cloud` and `-cloud`). The seat OVER-FLAGS — synthesize against code + a 2nd family on any `sound:false`/refute (e.g. it once assumed positive penalty weights; ours are negative).
+- **study-swarm** any qualitative design question (cite papers; connect each to a design implication) — Mike authorized it; it materially reshaped Findings A + the Epic-3 design.
+- **GOTCHAS:** (1) `uv run` serves a STALE built install after a source edit → `uv run --reinstall-package ai-crucible pytest …` or `uv sync --reinstall-package` to force the rebuild. (2) NEVER `git checkout -- <file>` to undo a temp edit if that file has uncommitted wave work — you'll discard the wave. (3) No backticks in a double-quoted `git commit -m` (bash command-substitutes) — use a `git commit -F -` heredoc. (4) Run agents' targeted tests only; coordinator runs the ONE serial `bash verify.sh` after (concurrent full-suite runs collide). (5) Public surfaces (README/CHANGELOG/SCORECARD/SHIP_GATE/landing/handbook/translations) are **coordinator-authored, never delegated.**
+
+## EPIC 4 — catalog persistence + graduation + differential typology
+Grounded in the feature audit (`swarm/feature-audit/FEATURE-SLATE.md` Epic 4; candidates roadmap-capability-003 + 004). The seam EXISTS: `CatalogTier` enum (LAB/ARENA/REGRESSION) + the `graduates()` graduation rule (Wilson at N≥20) + `meta.json` `catalog_tier`/`min_k` are present; **persistence + transitions + the differential are absent** (`grep -r differential src/` is empty; `PuzzleHistory` is in-memory per-batch only). Read `observability.py` (PuzzleHistory/graduation), `types.py` (CatalogTier), `cycle.py` (the run path that produces histories), the seed `meta.json` before locking the contract.
+
+Build (contract-lock → leaves → integrator):
+1. **Persistent catalog store** — a durable catalog (JSON or SQLite, your call; match repo style — pure-Python, no heavy dep) holding puzzle records + accumulated per-(puzzle,model) solve-history/pass^k across runs. `ai-crucible run` appends to it.
+2. **Graduation lifecycle** — apply `graduates()` with the configurable floor K (`min_k`): **Lab → Arena** on cross-family validation (the panel agrees, not just Claude); **demote saturated puzzles to Regression, never delete** (a capability-evolution timeline). Idempotent + legible transitions.
+3. **Differential typology** — per puzzle, compute Claude solve-rate vs cross-family-panel/CohortSolver solve-rate → emit the §4 typology: **Claude-specific gap** (Claude fails, others pass — highest value), **LLM-general gap** (all fail), **Claude-strength** (Claude passes, others fail — anti-regression). This is the diagnostic payoff.
+4. **CLI** — `ai-crucible catalog {list|show|graduate}` (or extend `run` to persist + a `catalog` read surface). Operator chrome → stderr, machine JSON → stdout, per the Stage-C convention.
+Test-first end-to-end (canned models + real run_diagnostic, NO network); cross-family verify the graduation math + the differential logic; serial `verify.sh` green; commit per cluster.
+
+## THEN finish the swarm (in order)
+5. **Finding B' — multi-model Solver protocol:** `solver_loop` reads only TEXT actions; gpt-oss-cloud returns empty `content` + native `tool_calls`. Add native-tool-call support so non-text-protocol models can Solve (read `models/ollama_adapter.py` `_extract_text`; the daemon response carries `message.tool_calls`). Re-validate a real gpt-oss run grounds.
+6. **Epic 2 follow-ups (optional, scope to value):** eval-awareness probe wiring (`eval_awareness.py` ProbePair → a runnable per-release boundary gate); round-against-round generation (the Designer crafts a harder puzzle from the last Solver failure — R-Zero seam, `roles.Designer` exists); 2–3 more capability-gap seed puzzles (study-swarm-grounded from real GH issues).
+7. **Phase 9 — final test:** comprehensive `verify.sh` green + a real multi-model `run` + the `self_test` discrimination check.
+8. **Phase 10 — full treatment (read `memory/full-treatment.md` + run `npx @mcptoolshop/shipcheck audit` first):** README/SCORECARD/SHIP_GATE refresh; **then the RELEASE — and this is the DIRECTOR's call to trigger:** version bump (0.2.0 → 0.3.0, pre-1.0 research preview — do NOT force v1.0.0; ω-provisional is the documented reason), CHANGELOG `[Unreleased]` → `[0.3.0]`, **regenerate the 7 translations BEFORE publish** (`node E:/AI/polyglot-mcp/scripts/translate-all.mjs README.md` — translations-before-publish + tag-at-the-right-commit, per the release-ordering rule), landing/handbook refresh, `gh release create v0.3.0` (release.yml OIDC publishes PyPI + npm). repo-knowledge entry already updated — refresh it post-release.
+
+## Honest framing to preserve
+The win this swarm bought: ai-crucible went from *passing* a fabricated-but-correct answer to *catching* it, and it can self-validate its own discrimination — grounded in the process-supervision / reward-hacking literature, not improvised. Keep that honesty bar. The repo is **not "done" until Phase 10 is whole** — but ω-retirement is legitimately deferred (no humans), disclosed, not faked.
