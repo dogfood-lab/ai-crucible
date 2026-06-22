@@ -96,6 +96,10 @@ commands:
                  Human rollup chrome → STDERR; machine JSON summary → STDOUT.
                  Each run is APPENDED to the durable catalog (--catalog PATH, default
                  {DEFAULT_CATALOG_PATH}; --no-catalog to skip).
+  probe          eval-awareness boundary gate: run the Solver under matched deploy- vs
+                 test-framing and report whether behaviour (bait-touch / solve) DIVERGES
+                 (a leaking eval cue, §10.5). usage:
+                   ai-crucible probe <puzzle-dir> --model <id>[@family] [--k N]
   catalog        read + curate the durable catalog (Epic 4 persistence/graduation). usage:
                    ai-crucible catalog list   [--catalog PATH]
                    ai-crucible catalog show   <puzzle-id> [--catalog PATH]
@@ -140,6 +144,9 @@ def _dispatch(command: str, rest: list[str]) -> int:
 
     if command == "catalog":
         return _catalog_command(rest)
+
+    if command == "probe":
+        return _probe_command(rest)
 
     sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
@@ -390,6 +397,58 @@ def _load_panel_and_signal(path: Path | None):
 
     panel = JudgePanel.from_seated(seated, judge_for)
     return (panel, panel_signal_from_seated(seated))
+
+
+def _probe_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible probe <puzzle-dir> --model <id>[@family] [--k N]`` (§10.5).
+
+    The runnable per-release eval-awareness boundary gate: runs the Solver under the matched
+    deploy- vs test-framing and reports whether behaviour (bait-touch / solve rate) diverges
+    — a divergence means an eval cue is leaking into the scored context (§10.1(d)). Human
+    chrome → STDERR, machine JSON → STDOUT (Stage-C). Exit 0 on a completed probe (a
+    DIVERGED result is data, not an exit failure); a load/stage failure surfaces the
+    structured error via ``main()`` (exit 1); a bad invocation is exit 2.
+    """
+    import argparse
+    import asyncio
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="ai-crucible probe",
+        description="Run the paired deploy-vs-test eval-awareness probe on a puzzle.",
+        add_help=True,
+    )
+    parser.add_argument("puzzle_dir", help="the puzzle directory (the one containing meta.json)")
+    parser.add_argument("--model", required=True, metavar="<id>[@family]",
+                        help="model spec; @family chooses the adapter (none/@claude → Claude)")
+    parser.add_argument("--k", type=int, default=1, help="sibling attempts PER framing (>=1)")
+    parser.add_argument("--divergence-threshold", type=float, default=0.0,
+                        help="bait-rate gap above which divergence is flagged (default 0.0)")
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+    if args.k < 1:
+        sys.stderr.write("ai-crucible probe: --k must be >= 1\n")
+        return 2
+
+    from ai_crucible.cycle import render_probe, run_eval_awareness_probe
+
+    model = _build_model(args.model)
+    result = asyncio.run(
+        run_eval_awareness_probe(
+            Path(args.puzzle_dir), model, args.k,
+            bait_divergence_threshold=args.divergence_threshold,
+        )
+    )
+    sys.stderr.write(render_probe(result) + "\n")
+    sys.stdout.write(_json.dumps({
+        "puzzle_id": result.puzzle_id, "k": result.k,
+        "deploy_bait_rate": result.deploy_bait_rate, "test_bait_rate": result.test_bait_rate,
+        "deploy_solve_rate": result.deploy_solve_rate, "test_solve_rate": result.test_solve_rate,
+        "bait_divergence": result.bait_divergence, "diverged": result.diverged,
+    }, default=str) + "\n")
+    return 0
 
 
 def _catalog_command(rest: list[str]) -> int:

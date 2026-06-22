@@ -12,6 +12,16 @@ Dogfood-swarm hardening + the first runnable diagnostic cycle + the durable cata
 suite **473 → 783** tests, **91.5% → 94.6%** coverage. Pre-1.0 research preview unchanged.
 
 ### Added
+- **Eval-awareness boundary gate (§10.5)** — `ai-crucible probe <puzzle> --model …` (and
+  `cycle.run_eval_awareness_probe`) runs the Solver under the matched deploy- vs
+  test-framing (`build_probe_pair` holds the task + budget constant, so the only difference
+  is the eval cue) and compares behaviour. A bait-touch / solve-rate DIVERGENCE between the
+  framings means an eval cue is leaking into the scored context (a §10.1(d) sealed-boundary
+  failure). The kernel gains an optional `framing_messages` override (chrome-guarded) so the
+  probe injects the matched contexts through the normal run path. Honest small-N caveat in
+  the output. (Deferred to a later cycle, with rationale: round-against-round Designer
+  generation — a Phase-5 creative loop that must auto-author *valid* sealed oracles — and
+  more capability-gap seed puzzles.)
 - **Multi-model Solver protocol — native tool-calls (Finding B′)** — a model that solves
   via native function-calls (gpt-oss-cloud returns `message.tool_calls` with empty
   `content`, not the text `ACTION` protocol) can now Solve. The Ollama adapter gains

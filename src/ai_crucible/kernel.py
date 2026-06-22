@@ -100,6 +100,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from ai_crucible.budget import BudgetExceeded, BudgetGovernor
 from ai_crucible.engagement import SealedBoundaryViolation, assert_no_chrome_leak
@@ -234,6 +235,7 @@ async def run_attempt(
     generator_family: str | None = None,
     event_store: object | None = None,
     time_source: Callable[[], float] = time.monotonic,
+    framing_messages: list[dict[str, Any]] | None = None,
 ) -> AttemptState:
     """Run one Solver attempt end-to-end and return the populated attempt.
 
@@ -303,7 +305,18 @@ async def run_attempt(
     writer = TraceWriter()
 
     # -- 2. Scored context + sealed-boundary andon (BEFORE any model call). ---- #
-    attempt.messages = build_scored_context(meta, loaded.prompt, _prior_scores(loaded), arm)
+    # The default scored context is rendered from the puzzle prompt under the framing arm.
+    # ``framing_messages`` OVERRIDES it (the eval-awareness probe injects a matched
+    # deploy- vs test-framed context, §10.5, so the ONLY difference between the two probe
+    # halves is the eval cue — build_probe_pair holds the task + budget constant). Still
+    # chrome-guarded below, so an override can never smuggle Tier-3 chrome into the
+    # scored surface.
+    if framing_messages is not None:
+        attempt.messages = [dict(m) for m in framing_messages]
+    else:
+        attempt.messages = build_scored_context(
+            meta, loaded.prompt, _prior_scores(loaded), arm
+        )
     # Fail-closed: if chrome leaked into the scored context, halt now — motivation
     # must never share a context window with measurement (§10.1(d,e)). This raises
     # SealedBoundaryViolation, never reaching the Solver.
