@@ -55,3 +55,6 @@ requirements-audit.txt
 char-*.json
 characterization-report.json
 site/.astro/
+
+# Epic-4 catalog runtime state (default run-path; an operator in another project may commit theirs)
+/catalog/

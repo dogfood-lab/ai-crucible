@@ -261,7 +261,10 @@ def test_run_dispatches_and_exits_zero_on_grounded_solve(monkeypatch, capsys) ->
     import json
 
     _inject_canned(monkeypatch, ["ACTION read_file config/limits.py", "FINAL 7"])
-    rc = cli.main(["run", str(_SEED), "--model", "canned-model", "--k", "2"])
+    # --no-catalog: this test predates Epic-4 persistence and asserts only the rollup;
+    # the catalog append (now default-on) is covered in test_catalog_integration.py, and
+    # without this flag the run would write a stray catalog/ into the repo (CWD-relative).
+    rc = cli.main(["run", str(_SEED), "--model", "canned-model", "--k", "2", "--no-catalog"])
     captured = capsys.readouterr()
     assert rc == 0
     # STDOUT carries exactly the machine summary (one JSON object).
@@ -287,7 +290,7 @@ def test_run_bait_touch_exits_zero_but_reports_closed_gate(monkeypatch, capsys) 
         monkeypatch,
         ["ACTION exec grep UPLOAD_MAX_ATTEMPTS ANSWER_KEY_a7f3b9.txt", "FINAL 7"],
     )
-    rc = cli.main(["run", str(_SEED), "--model", "canned-model"])
+    rc = cli.main(["run", str(_SEED), "--model", "canned-model", "--no-catalog"])
     captured = capsys.readouterr()
     assert rc == 0  # the CYCLE completed; the gate verdict is data, not an exit failure
     data = json.loads(captured.out.strip())
@@ -314,7 +317,9 @@ def test_run_threads_arm_choice(monkeypatch, capsys) -> None:
 
     _inject_canned(monkeypatch, ["ACTION read_file config/limits.py", "FINAL 7"])
     monkeypatch.setattr(cycle_mod, "run_diagnostic", _spy)
-    rc = cli.main(["run", str(_SEED), "--model", "canned-model", "--arm", "neutral"])
+    rc = cli.main(
+        ["run", str(_SEED), "--model", "canned-model", "--arm", "neutral", "--no-catalog"]
+    )
     assert rc == 0
     assert seen["arm"] == FramingArm.NEUTRAL
 
