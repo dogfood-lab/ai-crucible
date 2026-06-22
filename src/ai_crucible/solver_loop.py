@@ -86,7 +86,73 @@ from ai_crucible.types import AttemptState
 #: second action onto the first or trail garbage onto a clean marker/answer.
 _CONTROL_TOKEN = "<|"
 
-__all__ = ["ChatModel", "DEFAULT_TOOL_INSTRUCTION", "build_solver_generate"]
+__all__ = [
+    "ChatModel",
+    "DEFAULT_TOOL_INSTRUCTION",
+    "SANDBOX_TOOL_SCHEMAS",
+    "build_solver_generate",
+]
+
+#: Native function-calling schemas for the sandbox tools (Finding B'). A model that solves
+#: via native tool-calls (gpt-oss returns ``message.tool_calls`` + EMPTY ``content`` rather
+#: than the text ACTION protocol) is OFFERED these so its calls name our verbs; the loop
+#: routes them through the SAME governor + sandbox channel as the text protocol. A
+#: ``final_answer`` tool lets a native model that always emits a call signal completion
+#: explicitly (it may also just stop calling tools and emit a content answer). Offered only
+#: to a model that exposes ``complete_turn`` (OllamaModel); a text-only model never sees them.
+SANDBOX_TOOL_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file inside the sandbox working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "path to read"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "exec",
+            "description": "Run a shell command in the sandbox working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "the command"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file in the sandbox working directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "final_answer",
+            "description": "Submit your final answer and end the task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"answer": {"type": "string", "description": "your answer"}},
+                "required": ["answer"],
+            },
+        },
+    },
+]
 
 #: Key the kernel parks the live :class:`~ai_crucible.roles.Solver` under on
 #: ``state.metadata`` for the duration of the Solver turn (kernel ``_SOLVER_HANDLE``).
@@ -170,6 +236,11 @@ def build_solver_generate(
         raise ValueError(f"build_solver_generate needs max_turns >= 1, got {max_turns}")
     instruction = tool_instruction if tool_instruction is not None else DEFAULT_TOOL_INSTRUCTION
 
+    # Finding B': a model exposing ``complete_turn`` (OllamaModel) can solve via NATIVE
+    # tool-calls; we offer it the sandbox tool schemas and read its tool_calls. A text-only
+    # model (ClaudeModel, a canned test model) keeps the pure text ACTION protocol unchanged.
+    use_tools = hasattr(model, "complete_turn")
+
     async def generate(state: AttemptState) -> str:
         solver = _require_solver(state)
         _ensure_instruction(state, instruction)
@@ -177,37 +248,78 @@ def build_solver_generate(
         nudged = False
         last_text = ""
         for _turn in range(max_turns):
-            # Per-turn model call — the raw primitive, NOT the single-shot generate.
-            text = await model.complete(state.messages)
+            # Per-turn model call. The native path (Finding B') returns BOTH text and
+            # tool_calls; the text path returns text only (tool_calls = []).
+            if use_tools:
+                text, tool_calls = await model.complete_turn(  # type: ignore[attr-defined]
+                    state.messages, tools=SANDBOX_TOOL_SCHEMAS
+                )
+            else:
+                text, tool_calls = await model.complete(state.messages), []
             last_text = text
-            # The model's turn is part of the scored context the next turn sees.
-            state.messages.append({"role": "assistant", "content": text})
 
+            # One assistant turn — carry native tool_calls in Ollama's shape so a
+            # multi-turn native model sees its own prior calls (scored context).
+            asst: dict[str, Any] = {"role": "assistant", "content": text}
+            if tool_calls:
+                asst["tool_calls"] = [
+                    {"function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in tool_calls
+                ]
+            state.messages.append(asst)
+
+            # --- NATIVE tool-call path (Finding B') -------------------------------- #
+            if tool_calls:
+                terminal: str | None = None
+                executed_any = False
+                for tc in tool_calls:
+                    parsed_tc = _translate_tool_call(tc)
+                    if parsed_tc is None:
+                        # Unknown tool → a tool-role observation the model can react to.
+                        state.messages.append(
+                            _tool_msg(str(tc.get("name", "?")),
+                                      f"ERROR: unknown tool {tc.get('name')!r}")
+                        )
+                        continue
+                    verb, args = parsed_tc
+                    if verb == "FINAL":
+                        terminal = args  # final_answer tool → end the loop
+                        break
+                    # Same governor + sandbox channel as the text protocol (§10.2/§8.4); a
+                    # BudgetExceeded from record_tool_call PROPAGATES (Solver.act ANDON).
+                    await solver.record_tool_call(verb, args)
+                    observation = await _execute(solver, verb, args)
+                    state.messages.append(_tool_msg(verb, f"OBSERVATION ({verb}): {observation}"))
+                    executed_any = True
+                if terminal is not None:
+                    return terminal
+                if executed_any:
+                    continue
+                # tool_calls present but none usable → fall through to the text handling.
+
+            # --- TEXT (ACTION/FINAL line) protocol --------------------------------- #
             parsed = _parse_action(text)
-            if parsed is None:
-                # No recognized marker. Nudge ONCE, then treat raw text as FINAL so a
-                # model that just answers in prose still terminates (lenient parse).
-                if nudged:
-                    return text
-                nudged = True
-                state.messages.append({"role": "user", "content": _NUDGE})
+            if parsed is not None:
+                kind, payload = parsed
+                if kind == "FINAL":
+                    return payload  # the answer text (already stripped of the marker)
+                tool, args = kind, payload  # kind is the verb; payload is the args dict
+                await solver.record_tool_call(tool, args)
+                observation = await _execute(solver, tool, args)
+                state.messages.append(
+                    {"role": "user", "content": f"OBSERVATION ({tool}): {observation}"}
+                )
                 continue
 
-            kind, payload = parsed
-            if kind == "FINAL":
-                return payload  # the answer text (already stripped of the marker)
-
-            # ACTION: route through the governor (the only legitimate accounting path,
-            # §10.2 / §8.4), THEN execute via the same Solver's tools. A BudgetExceeded
-            # from record_tool_call PROPAGATES (do NOT swallow) — Solver.act stamps
-            # terminated_by (ANDON). Execution is wrapped so a tool-side error becomes an
-            # observation the model can react to, rather than aborting the attempt.
-            tool, args = kind, payload  # kind is the verb; payload is the args dict
-            await solver.record_tool_call(tool, args)
-            observation = await _execute(solver, tool, args)
-            state.messages.append(
-                {"role": "user", "content": f"OBSERVATION ({tool}): {observation}"}
-            )
+            # No recognized marker AND no tool calls. A NATIVE model that emits a content
+            # answer with no tool_calls is signaling completion → take it as the answer.
+            # A text model gets ONE nudge, then its raw text is finalized (lenient parse).
+            if use_tools and text.strip():
+                return text
+            if nudged:
+                return text
+            nudged = True
+            state.messages.append({"role": "user", "content": _NUDGE})
 
         # Exhausted max_turns without a FINAL — return the last model text as the
         # answer. A non-converging Solver is a (likely-wrong) answer, not an error;
@@ -227,6 +339,48 @@ _NUDGE = (
     "Emit exactly one of: ACTION read_file <path> | ACTION exec <command> | "
     "ACTION write_file <path> ::: <content> | FINAL <answer>."
 )
+
+
+def _tool_msg(tool_name: str, content: str) -> dict[str, Any]:
+    """A native tool-role observation message (Ollama tool-result shape, Finding B').
+
+    A native function-calling model expects its tool result back as a ``tool``-role
+    message tagged with the tool name, not a free user turn — so the multi-turn native
+    loop stays coherent (the model sees its call answered).
+    """
+    return {"role": "tool", "content": content, "tool_name": tool_name}
+
+
+def _translate_tool_call(tc: dict[str, Any]) -> tuple[str, Any] | None:
+    """Map a NATIVE tool-call ``{"name", "arguments"}`` to the loop's ``(verb, args)`` (Finding B').
+
+    Mirrors :func:`_parse_action_body`'s output so the native path and the text path feed
+    the SAME governor + sandbox channel. Lenient on argument keys (native models vary):
+    ``read_file`` accepts ``path``/``file``/``filename``; ``exec`` accepts
+    ``command``/``cmd``/``script``; ``write_file`` accepts ``path``+``content``/``text``;
+    and a ``final_answer``/``final``/``answer``/``submit`` tool maps to
+    ``("FINAL", answer)``. An unknown tool or a missing required operand returns ``None``
+    (the caller records an error observation the model can react to).
+    """
+    name = str(tc.get("name", "")).lower().strip()
+    args = tc.get("arguments")
+    if not isinstance(args, dict):
+        args = {}
+
+    if name in (_READ, "read", "readfile", "open", "cat"):
+        path = args.get("path") or args.get("file") or args.get("filename")
+        return (_READ, {"path": str(path)}) if path else None
+    if name in (_EXEC, "run", "shell", "bash", "command", "sh"):
+        cmd = args.get("command") or args.get("cmd") or args.get("script")
+        return (_EXEC, {"command": str(cmd)}) if cmd else None
+    if name in (_WRITE, "write", "writefile", "save"):
+        path = args.get("path") or args.get("file") or args.get("filename")
+        content = args.get("content") or args.get("text") or ""
+        return (_WRITE, {"path": str(path), "content": str(content)}) if path else None
+    if name in ("final_answer", "final", "answer", "finish", "submit", "done"):
+        ans = args.get("answer") or args.get("final") or args.get("text") or args.get("value") or ""
+        return ("FINAL", str(ans))
+    return None
 
 
 def _require_solver(state: AttemptState) -> Solver:

@@ -12,6 +12,14 @@ Dogfood-swarm hardening + the first runnable diagnostic cycle + the durable cata
 suite **473 → 783** tests, **91.5% → 94.6%** coverage. Pre-1.0 research preview unchanged.
 
 ### Added
+- **Multi-model Solver protocol — native tool-calls (Finding B′)** — a model that solves
+  via native function-calls (gpt-oss-cloud returns `message.tool_calls` with empty
+  `content`, not the text `ACTION` protocol) can now Solve. The Ollama adapter gains
+  `complete_turn` (offers the sandbox tool schemas, returns text + normalized tool_calls);
+  the solver loop routes native calls through the SAME governor + sandbox channel as the
+  text protocol (duck-typed — text-only models are unchanged). Validated live: gpt-oss
+  executed `read_file config/limits.py` via a native tool-call, grounded the read, and
+  solved the seed (gate PASS).
 - **Durable catalog + graduation lifecycle + differential typology (Epic 4)** — the
   instrument now ACCUMULATES across runs. `ai-crucible run` appends each cycle to an
   event-sourced, hash-chained catalog log (the source of truth); tier state

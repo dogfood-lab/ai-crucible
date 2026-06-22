@@ -74,6 +74,7 @@ Standards compliance (the six — workflow-standards.md)
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import re
@@ -299,6 +300,47 @@ def _extract_text(response: dict[str, Any]) -> str:
     if "response" in response:
         return _normalize_harmony(str(response["response"]))
     return ""
+
+
+def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull NATIVE function-calls out of an Ollama ``/api/chat`` response (Finding B').
+
+    A model trained to call tools natively (gpt-oss; OpenAI Harmony / Ollama tool-calling)
+    returns its actions as ``message.tool_calls`` and leaves ``content`` EMPTY, instead of
+    emitting the text ``ACTION`` line-protocol the solver loop's text parser reads — so a
+    purely-text Solver loop sees nothing and the model cannot Solve. This surfaces those
+    native calls so the loop can route them through the same governor + sandbox channel.
+
+    Each Ollama tool call is ``{"function": {"name": str, "arguments": dict | json-str}}``.
+    Returned NORMALIZED as ``{"name": str, "arguments": dict}`` (a string ``arguments`` is
+    JSON-decoded; an undecodable/absent one becomes ``{}``). A response with no
+    ``message.tool_calls`` (the text-protocol path) returns ``[]`` — never raises, so a
+    text Solver is unaffected.
+    """
+    message = response.get("message")
+    if not isinstance(message, dict):
+        return []
+    raw = message.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for tc in raw:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, TypeError):
+                args = {}
+        out.append({"name": str(name), "arguments": args if isinstance(args, dict) else {}})
+    return out
 
 
 def _first_token_logprob(response: dict[str, Any]) -> float | None:
@@ -663,7 +705,9 @@ class OllamaModel:
 
     # -- core completion ----------------------------------------------------- #
 
-    async def _complete_raw(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _complete_raw(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Call Ollama chat with the pinned options and return the **raw response**.
 
         Sends ``{model, messages, options}`` (options = :meth:`_options`, §11.2) to the
@@ -690,6 +734,11 @@ class OllamaModel:
         opaque ``AttributeError`` in :func:`_extract_text` (models-ollama-resilience-003).
         """
         client = self._resolve_client()
+        # Offer native function-calling tools when the caller supplies them (Finding B'):
+        # a native-protocol model (gpt-oss) then returns its actions as message.tool_calls
+        # instead of the text ACTION protocol. Omitted (no key) for the text-only path so a
+        # text Solver / a minimal fake client is unaffected.
+        extra = {"tools": tools} if tools else {}
 
         async def _call() -> dict[str, Any]:
             return await client(
@@ -697,6 +746,7 @@ class OllamaModel:
                 messages=messages,
                 options=self._options(),
                 **self._logprob_request(),
+                **extra,
             )
 
         response = await _call_with_retry(
@@ -743,6 +793,28 @@ class OllamaModel:
         guarantees a single request carries the replayable knobs.
         """
         return _extract_text(await self._complete_raw(messages))
+
+    async def complete_turn(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """One turn returning BOTH the assistant text AND any native tool-calls (Finding B').
+
+        The multi-model Solver primitive: a text-protocol model (Claude, or a model that
+        emits the ``ACTION`` line protocol) returns its move in the text; a native
+        function-calling model (gpt-oss) returns its move as ``tool_calls`` with empty
+        ``content``. The solver loop drives THIS when the model exposes it (duck-typed), so
+        a non-text-protocol model can Solve through the same governor + sandbox channel —
+        ``OllamaModel.complete`` (text-only) is the fallback the loop uses otherwise.
+
+        ``tools`` is the function-calling schema offered to the model (the loop passes the
+        sandbox read_file/exec/write_file schemas). Returns ``(text, tool_calls)`` where
+        ``tool_calls`` is the normalized ``[{"name", "arguments"}, ...]`` (possibly empty —
+        then the text carries the move/answer). Same single request path as
+        :meth:`complete` (the provenance + retry guards apply), so a mis-served model still
+        raises :class:`ModelMismatchError`.
+        """
+        response = await self._complete_raw(messages, tools=tools)
+        return (_extract_text(response), _extract_tool_calls(response))
 
     # -- kernel generate plug (§10.2) --------------------------------------- #
 

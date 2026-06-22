@@ -40,6 +40,7 @@ from ai_crucible.models.ollama_adapter import (
     OllamaBadResponseError,
     OllamaUnreachableError,
     _call_with_retry,
+    _extract_tool_calls,
     _is_transient,
     _norm_model,
     _normalize_harmony,
@@ -1162,3 +1163,75 @@ def test_ollama_judge_item_normalizes_harmony_leak() -> None:
 
     assert record.predicted == "PASS"
     assert "<|" not in record.predicted
+
+
+# --------------------------------------------------------------------------- #
+# Finding B' — native tool-call extraction + complete_turn
+# --------------------------------------------------------------------------- #
+
+
+class FakeToolCallClient:
+    """A fake Ollama client that answers with NATIVE tool_calls + empty content (gpt-oss).
+
+    Records every call's kwargs so a test can assert the ``tools`` schemas were offered.
+    Echoes the requested model so the served-vs-requested provenance guard passes.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return {
+            "model": kwargs.get("model", ""),
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "read_file",
+                                  "arguments": {"path": "config/limits.py"}}}
+                ],
+            },
+        }
+
+
+def test_extract_tool_calls_normalizes_dict_and_json_args() -> None:
+    dict_args = {"message": {"content": "", "tool_calls": [
+        {"function": {"name": "read_file", "arguments": {"path": "a.py"}}}]}}
+    assert _extract_tool_calls(dict_args) == [{"name": "read_file", "arguments": {"path": "a.py"}}]
+    # Some servers serialize arguments as a JSON string — decode it.
+    json_args = {"message": {"content": "", "tool_calls": [
+        {"function": {"name": "exec", "arguments": '{"command": "ls"}'}}]}}
+    assert _extract_tool_calls(json_args) == [{"name": "exec", "arguments": {"command": "ls"}}]
+
+
+def test_extract_tool_calls_empty_when_none_and_skips_malformed() -> None:
+    assert _extract_tool_calls({"message": {"content": "hi"}}) == []   # text path → []
+    assert _extract_tool_calls({}) == []
+    # A malformed entry (no function / no name) is skipped, not raised.
+    bad = {"message": {"tool_calls": [{"nope": 1}, {"function": {"arguments": {}}}]}}
+    assert _extract_tool_calls(bad) == []
+
+
+def test_complete_turn_returns_text_and_tool_calls_and_offers_tools() -> None:
+    from ai_crucible.solver_loop import SANDBOX_TOOL_SCHEMAS
+
+    client = FakeToolCallClient()
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+    text, tool_calls = asyncio.run(
+        model.complete_turn([{"role": "user", "content": "solve"}], tools=SANDBOX_TOOL_SCHEMAS)
+    )
+    assert text == ""  # gpt-oss returns empty content + native tool_calls
+    assert tool_calls == [{"name": "read_file", "arguments": {"path": "config/limits.py"}}]
+    # The tool schemas were actually passed to the daemon as a top-level `tools` kwarg.
+    assert client.calls[0]["tools"] is SANDBOX_TOOL_SCHEMAS
+
+
+def test_complete_turn_without_tools_is_text_only() -> None:
+    """No tools offered → a normal text completion, no tool_calls (and no `tools` kwarg)."""
+    client = FakeOllamaClient(content="the answer is 7")
+    model = OllamaModel("qwen3-coder:480b", family="qwen", client=client)
+    text, tool_calls = asyncio.run(model.complete_turn([{"role": "user", "content": "x"}]))
+    assert text == "the answer is 7"
+    assert tool_calls == []
+    assert "tools" not in client.calls[0]  # omitted on the text path

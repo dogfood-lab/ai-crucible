@@ -517,3 +517,119 @@ def test_leading_control_token_then_action_parses_action() -> None:
 
     assert answer == "7"
     assert ("read_file", "config/limits.py") in tools.touches
+
+
+# --------------------------------------------------------------------------- #
+# Finding B' — NATIVE tool-call protocol (gpt-oss returns tool_calls, not ACTION text)
+# --------------------------------------------------------------------------- #
+
+
+class NativeCannedModel:
+    """A model that solves via NATIVE tool-calls (exposes ``complete_turn``, Finding B').
+
+    Each scripted turn is ``(text, tool_calls)`` where ``tool_calls`` is the normalized
+    ``[{"name", "arguments"}, ...]`` :meth:`OllamaModel.complete_turn` returns. The loop
+    detects ``complete_turn`` (duck-typed) and offers the sandbox tool schemas; a turn with
+    tool_calls drives the native path, a turn with only text drives completion. Records the
+    ``tools`` it was offered so a test can assert the schemas were passed.
+    """
+
+    def __init__(self, turns: list[tuple[str, list[dict[str, Any]]]]) -> None:
+        self._turns = list(turns)
+        self.calls = 0
+        self.offered_tools: list[Any] = []
+
+    async def complete_turn(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        self.offered_tools.append(tools)
+        idx = min(self.calls, len(self._turns) - 1)
+        self.calls += 1
+        return self._turns[idx]
+
+
+def test_native_tool_calls_read_then_final_answer() -> None:
+    """A native model reads config/limits.py via a tool_call, then submits via final_answer
+    → the read is recorded through the governor and the answer is returned (Finding B')."""
+    model = NativeCannedModel([
+        ("", [{"name": "read_file", "arguments": {"path": "config/limits.py"}}]),
+        ("", [{"name": "final_answer", "arguments": {"answer": "7"}}]),
+    ])
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+
+    answer = anyio.run(build_solver_generate(model), state)
+
+    assert answer == "7"
+    assert ("read_file", "config/limits.py") in tools.touches
+    # The read_file call was RECORDED through the governor (kernel-side accounting), exactly
+    # like the text protocol — the native path uses the SAME channel.
+    assert {"tool": "read_file", "args": {"path": "config/limits.py"}} in _tool_events(state)
+    # The sandbox tool schemas were actually offered to the model.
+    assert any(t and any(s["function"]["name"] == "read_file" for s in t)
+               for t in model.offered_tools)
+
+
+def test_native_content_answer_without_tool_calls_terminates() -> None:
+    """A native model that stops calling tools and emits a content answer terminates with it
+    (no nudge needed) — the native completion signal (Finding B')."""
+    model = NativeCannedModel([
+        ("", [{"name": "read_file", "arguments": {"path": "config/limits.py"}}]),
+        ("The value is 7", []),  # content, no tool_calls → done
+    ])
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+
+    answer = anyio.run(build_solver_generate(model), state)
+    assert answer == "The value is 7"
+    assert ("read_file", "config/limits.py") in tools.touches
+
+
+def test_native_unknown_tool_is_an_error_observation_not_a_crash() -> None:
+    """An unknown native tool yields a tool-role error observation and the loop continues
+    (the model can react), rather than crashing the attempt (Finding B')."""
+    model = NativeCannedModel([
+        ("", [{"name": "python", "arguments": {"code": "print(1)"}}]),  # unknown → error obs
+        ("", [{"name": "final_answer", "arguments": {"answer": "7"}}]),
+    ])
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+
+    answer = anyio.run(build_solver_generate(model), state)
+    assert answer == "7"
+    # The unknown tool was NOT executed (no touch) but did not crash.
+    assert tools.touches == []
+    # An error observation was appended for the model to react to.
+    assert any(m.get("role") == "tool" and "unknown tool" in m.get("content", "")
+               for m in state.messages)
+
+
+def test_native_tool_call_budget_propagates_andon() -> None:
+    """A native tool_call that breaches the budget propagates BudgetExceeded out of generate
+    (the ANDON path is identical to the text protocol — Solver.act stamps terminated_by)."""
+    model = NativeCannedModel([
+        ("", [{"name": "exec", "arguments": {"command": "ls"}}]),
+        ("", [{"name": "exec", "arguments": {"command": "ls -a"}}]),
+    ])
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools, tool_budget=1)  # 1 call allowed; the 2nd breaches
+
+    with pytest.raises(BudgetExceeded):
+        anyio.run(build_solver_generate(model, max_turns=4), state)
+
+
+def test_text_protocol_model_unaffected_by_native_path() -> None:
+    """A text-only model (no complete_turn) keeps the pure ACTION protocol — the native
+    branch is never taken (backward compatibility)."""
+    model = CannedModel(["ACTION read_file config/limits.py", "FINAL 7"])
+    assert not hasattr(model, "complete_turn")
+    state = _make_state()
+    tools = FakeSandboxTools()
+    _park_solver(state, tools)
+    answer = anyio.run(build_solver_generate(model), state)
+    assert answer == "7"
+    assert ("read_file", "config/limits.py") in tools.touches
