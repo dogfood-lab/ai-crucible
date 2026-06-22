@@ -26,9 +26,13 @@ from ai_crucible.scoring.judge_panel import (
 )
 from ai_crucible.scoring.oracle import CRITICAL_FLAVOR, OracleOutcome, grade
 from ai_crucible.scoring.stats import (
+    benjamini_hochberg,
+    bernoulli_log_eprocess,
     clopper_pearson,
+    fisher_difference_pvalue,
     graduates,
     mcnemar_exact,
+    newcombe_wilson_diff,
     pass_hat_k,
     wilson_interval,
 )
@@ -40,6 +44,10 @@ __all__ = [
     "clopper_pearson",
     "mcnemar_exact",
     "graduates",
+    "newcombe_wilson_diff",
+    "fisher_difference_pvalue",
+    "benjamini_hochberg",
+    "bernoulli_log_eprocess",
     # oracle
     "OracleOutcome",
     "grade",

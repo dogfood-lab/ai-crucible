@@ -29,11 +29,15 @@ from ai_crucible.scoring import (
     CRITICAL_FLAVOR,
     JudgePanel,
     OracleOutcome,
+    benjamini_hochberg,
+    bernoulli_log_eprocess,
     clopper_pearson,
+    fisher_difference_pvalue,
     grade,
     graduates,
     judge_family,
     mcnemar_exact,
+    newcombe_wilson_diff,
     pass_hat_k,
     reduce_scores,
     weighted_judge,
@@ -1213,3 +1217,149 @@ def test_grade_finite_inputs_have_no_non_finite_condition(
     """A normal (finite) clean solve must NOT spuriously carry non_finite_input."""
     score = grade(scoring_attempt, scoring_meta, _clean_outcome())
     assert "non_finite_input" not in score.metadata["failed_conditions"]
+
+
+# --------------------------------------------------------------------------- #
+# Epic-4 catalog primitives: Newcombe diff CI / Fisher p / BH-FDR / e-process
+# --------------------------------------------------------------------------- #
+
+
+def test_newcombe_diff_zero_when_rates_equal() -> None:
+    """Equal proportions → delta 0 and a CI that straddles 0 (no difference)."""
+    lower, upper, delta = newcombe_wilson_diff(10, 20, 10, 20)
+    assert delta == 0.0
+    assert lower < 0.0 < upper
+
+
+def test_newcombe_diff_excludes_zero_for_strong_gap() -> None:
+    """A strong gap (18/20 vs 2/20) yields a positive CI that excludes 0."""
+    lower, upper, delta = newcombe_wilson_diff(18, 20, 2, 20)
+    assert delta == pytest.approx(0.8)
+    assert lower > 0.0  # the difference is real — CI excludes 0
+
+
+def test_newcombe_diff_sign_flips_with_argument_order() -> None:
+    """Swapping the two systems negates the delta and mirrors the interval."""
+    lo1, up1, d1 = newcombe_wilson_diff(18, 20, 2, 20)
+    lo2, up2, d2 = newcombe_wilson_diff(2, 20, 18, 20)
+    assert d2 == pytest.approx(-d1)
+    assert lo2 == pytest.approx(-up1)
+    assert up2 == pytest.approx(-lo1)
+
+
+def test_newcombe_diff_stays_in_unit_diff_range() -> None:
+    """At the 20/20-vs-0/20 extreme the bounds stay within [-1, 1]."""
+    lower, upper, delta = newcombe_wilson_diff(20, 20, 0, 20)
+    assert delta == 1.0
+    assert -1.0 <= lower <= upper <= 1.0
+
+
+def test_newcombe_diff_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(5, 0, 1, 10)  # n1 = 0
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(11, 10, 1, 10)  # s1 > n1
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(5, 10, 1, 10, conf=1.5)  # bad conf
+
+
+def test_fisher_difference_pvalue_near_one_for_equal() -> None:
+    """Identical proportions → no evidence of a difference → p ≈ 1."""
+    assert fisher_difference_pvalue(10, 20, 10, 20) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_fisher_difference_pvalue_small_for_strong_gap() -> None:
+    """A strong gap is significant at conventional levels."""
+    assert fisher_difference_pvalue(18, 20, 2, 20) < 0.001
+
+
+def test_fisher_difference_pvalue_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        fisher_difference_pvalue(1, 0, 1, 10)
+    with pytest.raises(ValueError):
+        fisher_difference_pvalue(11, 10, 1, 10)
+
+
+def test_benjamini_hochberg_empty_is_empty() -> None:
+    assert benjamini_hochberg([], q=0.10) == []
+
+
+def test_benjamini_hochberg_all_tiny_all_survive() -> None:
+    survived = benjamini_hochberg([0.0001, 0.0002, 0.0003], q=0.10)
+    assert survived == [True, True, True]
+
+
+def test_benjamini_hochberg_none_survive_when_all_large() -> None:
+    survived = benjamini_hochberg([0.9, 0.8, 0.95], q=0.10)
+    assert survived == [False, False, False]
+
+
+def test_benjamini_hochberg_step_up_rejects_below_threshold() -> None:
+    """Classic step-up: with m=4, q=0.10 the sorted p's [0.005,0.02,0.03,0.5]
+    have cutoffs 0.025,0.05,0.075,0.10 → the three small p's pass, 0.5 fails, and
+    the result preserves INPUT order."""
+    survived = benjamini_hochberg([0.5, 0.005, 0.03, 0.02], q=0.10)
+    assert survived == [False, True, True, True]
+
+
+def test_benjamini_hochberg_is_less_conservative_than_bonferroni() -> None:
+    """A p above Bonferroni (q/m) but under its BH step still survives.
+
+    m=3, q=0.30 → Bonferroni cut q/m=0.10; BH cuts are 0.10, 0.20, 0.30. The
+    0.15 p-value is above Bonferroni's 0.10 but under its rank-2 BH cut (0.20),
+    so BH rejects it where Bonferroni would not.
+    """
+    survived = benjamini_hochberg([0.05, 0.15, 0.9], q=0.30)
+    assert survived[0] is True and survived[1] is True and survived[2] is False
+
+
+def test_benjamini_hochberg_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        benjamini_hochberg([0.1], q=0.0)
+    with pytest.raises(ValueError):
+        benjamini_hochberg([1.2], q=0.10)
+
+
+def test_eprocess_positive_for_high_success_run() -> None:
+    """A near-saturated run (19/20) accumulates positive log-evidence for H1."""
+    assert bernoulli_log_eprocess(19, 20, p0=0.90, p1=0.97) > 0.0
+
+
+def test_eprocess_negative_for_low_success_run() -> None:
+    """A low-success run is evidence AGAINST saturation (negative log-e)."""
+    assert bernoulli_log_eprocess(5, 20, p0=0.90, p1=0.97) < 0.0
+
+
+def test_eprocess_accumulates_across_runs_to_threshold() -> None:
+    """Two clean 20/20 runs cross the demotion threshold ln(1/0.05)=ln(20);
+    a single 20/20 run does not (dwell is emergent — CONTRACT §B)."""
+    import math
+
+    one = bernoulli_log_eprocess(20, 20, p0=0.90, p1=0.97)
+    two = one + bernoulli_log_eprocess(20, 20, p0=0.90, p1=0.97)
+    assert one < math.log(20.0)   # one lucky run cannot demote
+    assert two >= math.log(20.0)  # sustained evidence does
+
+
+def test_eprocess_expectation_is_one_at_h0_boundary() -> None:
+    """e-value validity: E[e_run] = 1 under H0 at the boundary p=p0 (it is a test
+    martingale). Sum over all outcomes of P(x|p0)·exp(log_e(x)) == 1."""
+    import math
+
+    from scipy.stats import binom
+
+    n, p0, p1 = 8, 0.90, 0.97
+    expectation = sum(
+        binom.pmf(x, n, p0) * math.exp(bernoulli_log_eprocess(x, n, p0=p0, p1=p1))
+        for x in range(n + 1)
+    )
+    assert expectation == pytest.approx(1.0, abs=1e-9)
+
+
+def test_eprocess_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 0, p0=0.9, p1=0.97)
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 10, p0=0.0, p1=0.97)
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 10, p0=0.9, p1=1.0)

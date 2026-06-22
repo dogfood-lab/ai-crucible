@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 
-from scipy.stats import beta, binomtest, norm
+from scipy.stats import beta, binomtest, fisher_exact, norm
 
 __all__ = [
     "pass_hat_k",
@@ -27,6 +27,10 @@ __all__ = [
     "mcnemar_exact",
     "graduates",
     "conformal_coverage_interval",
+    "newcombe_wilson_diff",
+    "fisher_difference_pvalue",
+    "benjamini_hochberg",
+    "bernoulli_log_eprocess",
 ]
 
 
@@ -275,3 +279,177 @@ def graduates(successes: int, n: int) -> bool:
     # comparison would yield numpy.bool_, breaking the ``-> bool`` contract and
     # ``is True`` identity checks downstream.
     return bool(lower >= 0.10 and upper <= 0.90)
+
+
+# --------------------------------------------------------------------------- #
+# Epic-4 catalog primitives (the differential + saturation math)
+# --------------------------------------------------------------------------- #
+
+
+def newcombe_wilson_diff(
+    s1: int, n1: int, s2: int, n2: int, conf: float = 0.95
+) -> tuple[float, float, float]:
+    """Newcombe-1998 hybrid-score CI for the difference of two INDEPENDENT proportions.
+
+    The differential typology (research-grounding §4) asks whether Claude's solve
+    rate differs from the cross-family cohort's on a puzzle. Claude and the cohort
+    run INDEPENDENT attempt sets, so this is an UNPAIRED two-proportion comparison —
+    :func:`mcnemar_exact` is the WRONG tool here (it is paired). The right small-N
+    estimator is Newcombe's "method 10": build a CI for ``p1 − p2`` by COMBINING the
+    two single-proportion Wilson intervals (Newcombe 1998, "Interval estimation for
+    the difference between independent proportions: comparison of eleven methods",
+    Statistics in Medicine 17(8):873-890,
+    doi:10.1002/(SICI)1097-0258(19980430)17:8<873::AID-SIM779>3.0.CO;2-I — "performs
+    well and is readily implemented irrespective of sample size").
+
+    **Do NOT** decide a difference by checking whether two separate Wilson intervals
+    overlap: the interval-overlap heuristic is over-conservative and fails to reject
+    when it should (Schenker & Gentleman 2001, The American Statistician
+    55(3):182-186, doi:10.1198/000313001317097960). Test the DIFFERENCE — this CI.
+
+    With ``p1 = s1/n1``, ``p2 = s2/n2``, ``δ = p1 − p2`` and the two Wilson intervals
+    ``(l1, u1)`` and ``(l2, u2)`` (at confidence ``conf``)::
+
+        lower = δ − sqrt((p1 − l1)² + (u2 − p2)²)
+        upper = δ + sqrt((u1 − p1)² + (p2 − l2)²)
+
+    Args:
+        s1, n1: successes / attempts for system 1 (Claude). ``0 <= s1 <= n1``, ``n1>0``.
+        s2, n2: successes / attempts for system 2 (the cohort). ``0 <= s2 <= n2``, ``n2>0``.
+        conf: confidence level in ``(0, 1)``; default 0.95.
+
+    Returns:
+        ``(lower, upper, delta)`` with ``lower``/``upper`` clamped to ``[-1, 1]``.
+
+    Raises:
+        ValueError: if either count pair is out of range or ``conf`` not in ``(0, 1)``.
+    """
+    _validate_counts(s1, n1)
+    _validate_counts(s2, n2)
+    if not 0.0 < conf < 1.0:
+        raise ValueError(f"conf must be in (0, 1), got {conf}")
+
+    p1 = s1 / n1
+    p2 = s2 / n2
+    delta = p1 - p2
+    l1, u1 = wilson_interval(s1, n1, conf=conf)
+    l2, u2 = wilson_interval(s2, n2, conf=conf)
+    lower = delta - math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2)
+    upper = delta + math.sqrt((u1 - p1) ** 2 + (p2 - l2) ** 2)
+    return (max(-1.0, lower), min(1.0, upper), delta)
+
+
+def fisher_difference_pvalue(s1: int, n1: int, s2: int, n2: int) -> float:
+    """Two-sided Fisher exact p-value for H0: the two proportions are equal.
+
+    The per-puzzle significance handle the catalog-level BH-FDR pass consumes
+    (:func:`benjamini_hochberg`). Fisher's EXACT test on the 2×2 contingency table
+    ``[[s1, n1−s1], [s2, n2−s2]]`` is the small-N-admissible choice (matching the
+    exact-at-small-N discipline of :func:`clopper_pearson` / :func:`mcnemar_exact`;
+    a normal-approximation z-test is inadmissible at N≈20, research-grounding §1).
+
+    Args:
+        s1, n1: successes / attempts for system 1. ``0 <= s1 <= n1``, ``n1 > 0``.
+        s2, n2: successes / attempts for system 2. ``0 <= s2 <= n2``, ``n2 > 0``.
+
+    Returns:
+        Two-sided exact p-value in ``[0.0, 1.0]``.
+
+    Raises:
+        ValueError: if either count pair is out of range.
+    """
+    _validate_counts(s1, n1)
+    _validate_counts(s2, n2)
+    table = [[s1, n1 - s1], [s2, n2 - s2]]
+    return float(fisher_exact(table, alternative="two-sided")[1])
+
+
+def benjamini_hochberg(pvalues: list[float], q: float = 0.10) -> list[bool]:
+    """Benjamini-Hochberg FDR control — which hypotheses survive at level ``q``.
+
+    Across many puzzles the differential runs many comparisons, so a per-puzzle
+    "significant" call needs multiple-comparison control or the catalog fills with
+    false typology labels. BH controls the false-discovery rate at ``q`` for
+    independent (or PRDS) tests (Benjamini & Hochberg 1995, JRSS-B 57(1):289-300).
+    The catalog classifier downgrades non-survivors to INCONCLUSIVE_UNDERPOWERED.
+
+    (For dependent tests the more conservative Benjamini-Yekutieli is the right
+    choice — it already ships in ``characterize.metrics`` for the alt-test; across
+    largely-independent puzzles BH is the appropriate, less conservative control.)
+
+    Args:
+        pvalues: the per-hypothesis p-values (each in ``[0, 1]``). Order preserved.
+        q: target FDR in ``(0, 1)``; default 0.10.
+
+    Returns:
+        A list of bools, ``survived[i]`` True iff hypothesis ``i`` is rejected
+        (a discovery) under BH at level ``q``. An empty input returns ``[]``.
+
+    Raises:
+        ValueError: if ``q`` not in ``(0, 1)`` or any p-value is out of ``[0, 1]``.
+    """
+    if not 0.0 < q < 1.0:
+        raise ValueError(f"q must be in (0, 1), got {q}")
+    m = len(pvalues)
+    if m == 0:
+        return []
+    for p in pvalues:
+        if not 0.0 <= p <= 1.0:
+            raise ValueError(f"p-values must be in [0, 1], got {p}")
+    # Rank ascending; the BH threshold is the largest k with p_(k) <= (k/m)·q.
+    order = sorted(range(m), key=lambda i: pvalues[i])
+    max_k = 0
+    for rank, idx in enumerate(order, start=1):
+        if pvalues[idx] <= (rank / m) * q:
+            max_k = rank
+    survived = [False] * m
+    # Step-up: reject all hypotheses with rank <= max_k (i.e. the max_k smallest p's).
+    for rank, idx in enumerate(order, start=1):
+        if rank <= max_k:
+            survived[idx] = True
+    return survived
+
+
+def bernoulli_log_eprocess(successes: int, n: int, p0: float, p1: float) -> float:
+    """Log e-value increment for ONE run, testing H0: p ≤ ``p0`` vs the point H1: p = ``p1``.
+
+    The anytime-valid building block of the saturation rule (CONTRACT §B). A
+    catalog that peeks after every run cannot act on a FIXED-N Wilson interval at a
+    data-dependent stopping time without inflating the false-demotion rate; an
+    e-process is valid at EVERY sample count (Howard, Ramdas, McAuliffe & Sekhon,
+    "Time-uniform Chernoff bounds via nonnegative supermartingales", Annals of
+    Statistics 2021, 49(2):1055-1080, doi:10.1214/20-AOS1991; the e-value framing of
+    Ramdas/Grünwald/Vovk/Shafer).
+
+    The per-run e-value is the likelihood ratio at the H0 boundary::
+
+        E_run = (p1/p0)^s · ((1−p1)/(1−p0))^(n−s)
+
+    which has expectation ≤ 1 under any ``p ≤ p0`` (it is a test supermartingale),
+    so the PRODUCT of per-run e-values across runs is a valid e-process for the
+    composite H0: p ≤ p0. This returns its NATURAL LOG (summed across runs by the
+    caller, avoiding overflow); demote when the accumulated log-e crosses
+    ``ln(1/alpha)``. With ``p1 > p0`` the statistic accumulates evidence that p is
+    HIGH (saturation); the re-promotion direction reuses this on the failure counts
+    (``successes → n−successes``, ``p0 → 1−p0``).
+
+    Args:
+        successes: successes in this run (0 <= successes <= n).
+        n: attempts in this run (n > 0).
+        p0: the H0-boundary rate, in ``(0, 1)``.
+        p1: the H1 point rate, in ``(0, 1)`` (``!= p0``; ``> p0`` for the saturation
+            direction).
+
+    Returns:
+        The natural-log e-value increment for this run (a float; may be negative).
+
+    Raises:
+        ValueError: if counts are out of range or ``p0``/``p1`` not in ``(0, 1)``.
+    """
+    _validate_counts(successes, n)
+    if not 0.0 < p0 < 1.0:
+        raise ValueError(f"p0 must be in (0, 1), got {p0}")
+    if not 0.0 < p1 < 1.0:
+        raise ValueError(f"p1 must be in (0, 1), got {p1}")
+    failures = n - successes
+    return successes * math.log(p1 / p0) + failures * math.log((1.0 - p1) / (1.0 - p0))
