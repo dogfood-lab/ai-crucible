@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import ai_crucible.calibration.loader as loader_mod
 from ai_crucible.calibration.irt import (
     IRTError,
     fit_irt_bayesian,
@@ -187,6 +188,51 @@ def test_duplicate_ids_across_dir_raises(tmp_path: Path) -> None:
     (tmp_path / "b.json").write_text(json.dumps(_min_record("dup")), encoding="utf-8")
     with pytest.raises(CalibrationLoadError, match="DUPLICATE_ID"):
         load_items(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# Loader — resource bounds at the trust boundary  [finding 005]
+# --------------------------------------------------------------------------- #
+
+
+def test_oversized_calibration_file_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    # [instrument-future-deps-005] An operator-supplied file is external content;
+    # without a cap it is slurped whole via read_text and can OOM. SIMULATE an
+    # oversized file (shrink the cap so the test stays cheap) and assert the
+    # bounded structured rejection BEFORE the read, not a crash.
+    monkeypatch.setattr(loader_mod, "_MAX_FILE_BYTES", 64)
+    big = tmp_path / "big.json"
+    # A valid-shaped record whose serialisation exceeds the (shrunk) cap.
+    rec = _min_record()
+    rec["construct"] = "x" * 200  # push the file well past 64 bytes
+    big.write_text(json.dumps(rec), encoding="utf-8")
+    assert big.stat().st_size > 64
+
+    with pytest.raises(CalibrationLoadError, match="FILE_TOO_LARGE"):
+        load_items(big)
+
+
+def test_over_count_calibration_dir_is_bounded(tmp_path: Path, monkeypatch) -> None:
+    # [instrument-future-deps-005] An operator directory with an unbounded file
+    # count must be rejected before reading any of it. SIMULATE an over-count dir
+    # (shrink the cap) and assert the bounded structured rejection.
+    monkeypatch.setattr(loader_mod, "_MAX_DIR_FILES", 2)
+    for i in range(3):  # 3 > the shrunk cap of 2
+        (tmp_path / f"item-{i}.json").write_text(
+            json.dumps(_min_record(f"id-{i}")), encoding="utf-8"
+        )
+
+    with pytest.raises(CalibrationLoadError, match="DIR_TOO_MANY_FILES"):
+        load_items(tmp_path)
+
+
+def test_within_bounds_dir_still_loads(tmp_path: Path) -> None:
+    # Regression guard: a normal small directory loads cleanly under the real
+    # (generous) caps — the bound must not trip on legitimate input.
+    (tmp_path / "a.json").write_text(json.dumps(_min_record("ok-1")), encoding="utf-8")
+    (tmp_path / "b.json").write_text(json.dumps(_min_record("ok-2")), encoding="utf-8")
+    items = load_items(tmp_path)
+    assert {it.id for it in items} == {"ok-1", "ok-2"}
 
 
 # --------------------------------------------------------------------------- #

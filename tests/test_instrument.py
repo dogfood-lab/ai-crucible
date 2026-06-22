@@ -17,10 +17,12 @@ the documented-stub NotImplementedError.
 from __future__ import annotations
 
 import json
+import warnings
 
 import numpy as np
 import pytest
 
+import ai_crucible.instrument.inspect_task as inspect_task_mod
 from ai_crucible.instrument import (
     ASPREDICTED_QUESTION_IDS,
     SUT,
@@ -33,6 +35,7 @@ from ai_crucible.instrument import (
     TuningBudgetError,
     TuningError,
     aspredicted_template,
+    assert_versioned,
     bo_search,
     bump_on_change,
     canonical_bundle_json,
@@ -47,6 +50,10 @@ from ai_crucible.instrument import (
     to_inspect_task,
     two_repo_layout,
 )
+
+# The version-increment helper is private (not in __all__); import it from the
+# submodule directly so the public surface stays unchanged.
+from ai_crucible.instrument.rubric_bundle import _next_version
 
 # --------------------------------------------------------------------------- #
 # prereg
@@ -216,6 +223,101 @@ def test_canonical_bundle_json_is_byte_stable_across_key_order():
 
 
 # --------------------------------------------------------------------------- #
+# rubric_bundle — assert_versioned (the §9.1 ENFORCING seal)  [finding 001]
+# --------------------------------------------------------------------------- #
+#
+# bump_on_change is a pure *suggester*: nothing forces the caller to assign its
+# return. The ENFORCING half of the §9.1 "version changes iff hash changes"
+# invariant is assert_versioned — a real andon gate that RAISES when the scoring
+# content changed but the version label did not. The RED probe MUTATES the
+# protected thing (a weight, which moves the content hash) while leaving the
+# version label fixed, and asserts the gate FIRES.
+
+
+def test_assert_versioned_raises_when_content_changed_but_version_pinned():
+    # MUTATE THE PROTECTED THING: a weight delta moves the content hash.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0", weights={"answer_key_fetch": -151.0, "elegance_bonus_max": 24.0})
+    # The hash genuinely changed (verify the premise), so leaving version pinned
+    # is exactly the §9.1 "silent retconning" the seal must refuse.
+    assert compile_bundle(old)[0] != compile_bundle(new)[0]
+    with pytest.raises(RubricBundleError) as exc:
+        assert_versioned(old, new)
+    # Structured error shape, naming the unbumped version vector.
+    assert "STATE_RUBRIC_VERSION_NOT_BUMPED" in str(exc.value)
+    assert "hint:" in str(exc.value)
+
+
+def test_assert_versioned_passes_when_changed_content_carries_new_version():
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.1", weights={"answer_key_fetch": -151.0, "elegance_bonus_max": 24.0})
+    # Content changed AND version advanced — the gate is satisfied and returns
+    # the (already-correct) new hash for the caller to record.
+    new_hash = assert_versioned(new=new, old=old)
+    assert new_hash == compile_bundle(new)[0]
+
+
+def test_assert_versioned_passes_on_identical_content_same_version():
+    # No-op edit, same label — nothing to enforce.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0")
+    assert assert_versioned(old, new) == compile_bundle(new)[0]
+
+
+def test_assert_versioned_rejects_relabel_of_identical_content():
+    # Same scoring content but a NEW label is also a §9.1 violation: two
+    # byte-identical bundles must never carry two different versions.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v2.0")  # identical content, different label
+    with pytest.raises(RubricBundleError) as exc:
+        assert_versioned(old, new)
+    assert "STATE_RUBRIC_VERSION_DRIFT" in str(exc.value)
+
+
+def test_bump_on_change_noop_preserves_callers_relabel():
+    # Regression for the no-op branch that silently discarded the caller's label:
+    # identical content but an explicit relabel should keep the NEW label, not
+    # silently revert to old.version.
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v2.0")  # identical content, deliberate relabel
+    assert bump_on_change(old, new) == "v2.0"
+
+
+def test_bump_on_change_noop_same_label_keeps_it():
+    old = _bundle(version="v1.0")
+    new = _bundle(version="v1.0")  # identical content, same label
+    assert bump_on_change(old, new) == "v1.0"
+
+
+# --------------------------------------------------------------------------- #
+# rubric_bundle — _next_version date-style / zero-pad handling  [finding 002]
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("old_version", "expected"),
+    [
+        ("2026.06", "2026.07"),  # zero-pad preserved, NOT mangled to 2026.7
+        ("v2026.06", "v2026.07"),
+        ("2026.09", "2026.10"),  # carry past the pad width widens correctly
+        ("v1.09", "v1.10"),
+        ("v01", "v02"),  # single zero-padded segment
+        ("v1.", "v1.+1"),  # dangling dot is not a numeric segment -> +1 suffix
+    ],
+)
+def test_next_version_preserves_zero_padding_and_dangling_dot(old_version, expected):
+    assert _next_version(old_version) == expected
+
+
+def test_bump_on_change_date_style_label_not_mangled():
+    # End-to-end through bump_on_change: a calendar-pinned rubric that changes
+    # content advances to a sane next-month label, not a zero-pad-stripped one.
+    old = _bundle(version="2026.06")
+    new = _bundle(version="2026.06", judge_prompts={"novelty": "DIFFERENT prompt"})
+    assert bump_on_change(old, new) == "2026.07"
+
+
+# --------------------------------------------------------------------------- #
 # tuning — split_inventory
 # --------------------------------------------------------------------------- #
 
@@ -360,6 +462,28 @@ def test_sobol_screen_rejects_empty_params():
     assert "INPUT_SOBOL_NO_PARAMS" in str(exc.value)
 
 
+def test_sobol_screen_surfaces_nan_objective_not_silent_zero():
+    # [instrument-future-deps-001] A NaN objective must NOT be silently masked to
+    # T_i=0.0 (which would FREEZE a load-bearing weight as zero-sensitivity).
+    # SIMULATE the failure: an objective that returns NaN for some samples, and
+    # assert the screen SURFACES it (ANDON raise) rather than reporting a clean 0.0.
+    def nan_model_fn(x: np.ndarray) -> np.ndarray:
+        out = np.asarray(3.0 * x[0] + 1.0 * x[1], dtype=float)
+        out[0] = np.nan  # one Saltelli sample evaluates to NaN
+        return out
+
+    with pytest.raises(TuningError) as exc:
+        sobol_screen(
+            param_names=["w0", "w1"],
+            bounds=[(0.0, 1.0), (0.0, 1.0)],
+            model_fn=nan_model_fn,
+            n=128,
+            seed=0,
+        )
+    assert "STATE_SOBOL_NONFINITE_OBJECTIVE" in str(exc.value)
+    assert "hint:" in str(exc.value)
+
+
 # --------------------------------------------------------------------------- #
 # tuning — ThresholdoutBudget
 # --------------------------------------------------------------------------- #
@@ -460,6 +584,45 @@ def test_render_sut_yaml_rejects_family_alias():
     assert "INPUT_SUT_FAMILY_ALIAS" in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    "alias_model_id",
+    [
+        "claude-opus²",  # superscript TWO — str.isdigit() True, NOT ascii
+        "claude-opus-٤",  # Arabic-Indic digit FOUR — isdigit() True, not ascii
+        "gpt⁵",  # superscript FIVE
+    ],
+)
+def test_render_sut_yaml_rejects_non_ascii_digit_alias(alias_model_id):
+    # [instrument-future-deps-004] A model id whose only "digit" is a non-ASCII
+    # numeral/superscript is still a family alias — str.isdigit() would let it
+    # masquerade as an exact version and WEAKEN the §9.6 guardrail. SIMULATE such
+    # an id and assert the guardrail FIRES (alias rejected).
+    sut = SUT(
+        model_id=alias_model_id,
+        provider_endpoint="https://api.anthropic.com/v1/messages",
+        system_prompt_sha="a" * 64,
+        harness_commit_sha="b" * 40,
+        container_digest="sha256:" + "c" * 64,
+    )
+    with pytest.raises(SUTError) as exc:
+        render_sut_yaml(sut)
+    assert "INPUT_SUT_FAMILY_ALIAS" in str(exc.value)
+
+
+def test_render_sut_yaml_accepts_ascii_digit_version():
+    # Regression guard for the ASCII-only fix: a legitimate ASCII-digit version
+    # must still pass the guardrail (the fix must not over-reject).
+    sut = SUT(
+        model_id="mistral-large-2411",  # ASCII digits -> exact version
+        provider_endpoint="https://api.mistral.ai/v1/chat/completions",
+        system_prompt_sha="a" * 64,
+        harness_commit_sha="b" * 40,
+        container_digest="sha256:" + "c" * 64,
+    )
+    # Does not raise; round-trips cleanly.
+    assert parse_sut_yaml(render_sut_yaml(sut)) == sut
+
+
 def test_render_sut_yaml_rejects_empty_field():
     sut = SUT(
         model_id="claude-opus-4-7-20260415",
@@ -491,6 +654,41 @@ def test_render_sut_yaml_round_trips_values_with_special_chars():
         container_digest="sha256:" + "f" * 64,
     )
     assert parse_sut_yaml(render_sut_yaml(sut)) == sut
+
+
+def test_parse_sut_yaml_rejects_duplicate_key():
+    # [instrument-future-deps-003] A duplicate key must be REJECTED, not silently
+    # resolved last-wins (which would quietly discard a pinned value from the
+    # frozen reproducibility record). SIMULATE the malformed input and assert the
+    # structured rejection.
+    text = (
+        'model_id: "claude-opus-4-7-20260415"\n'
+        'model_id: "claude-opus-4-7-99999999"\n'  # duplicate, would last-win today
+        'provider_endpoint: "https://api.anthropic.com/v1/messages"\n'
+        f'system_prompt_sha: "{"a" * 64}"\n'
+        f'harness_commit_sha: "{"b" * 40}"\n'
+        f'container_digest: "sha256:{"c" * 64}"\n'
+    )
+    with pytest.raises(SUTError) as exc:
+        parse_sut_yaml(text)
+    assert "INPUT_SUT_DUPLICATE_KEY" in str(exc.value)
+    assert "hint:" in str(exc.value)
+
+
+def test_parse_sut_yaml_rejects_indented_nested_structure():
+    # [instrument-future-deps-003] An indented / nested-list line is unrepresentable
+    # in this flat format and must be rejected rather than misread or flattened.
+    text = (
+        'model_id: "claude-opus-4-7-20260415"\n'
+        "provider_endpoint:\n"
+        '  - "https://api.anthropic.com/v1/messages"\n'  # malformed indented list
+        f'system_prompt_sha: "{"a" * 64}"\n'
+        f'harness_commit_sha: "{"b" * 40}"\n'
+        f'container_digest: "sha256:{"c" * 64}"\n'
+    )
+    with pytest.raises(SUTError) as exc:
+        parse_sut_yaml(text)
+    assert "INPUT_SUT_BAD_LINE" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -554,3 +752,61 @@ def test_two_repo_layout_describes_the_split():
     results_lc = results_raw.lower()
     assert "pre-registration" in results_lc or "preregistration" in results_lc
     assert "TUNING.md" in results_raw
+
+
+# --------------------------------------------------------------------------- #
+# inspect_task — inspect-ai version drift guard  [finding 002]
+# --------------------------------------------------------------------------- #
+
+
+def test_inspect_task_warns_on_untested_inspect_ai_version(sample_meta, monkeypatch):
+    # [instrument-future-deps-002] inspect-ai is pinned >=0.3 with no upper bound;
+    # the Sample.model_dump() shape is consumed wholesale. SIMULATE a future
+    # version outside the tested range and assert the runtime check WARNS (drift
+    # made legible) rather than consuming a possibly-drifted shape silently.
+    monkeypatch.setattr(
+        inspect_task_mod, "version", lambda _name: "0.9.0", raising=True
+    )
+    with pytest.warns(UserWarning, match="CONFIG_INSPECT_AI_UNTESTED_VERSION"):
+        to_inspect_task(sample_meta, "do the thing")
+
+
+def test_inspect_task_silent_on_in_range_inspect_ai_version(sample_meta, monkeypatch):
+    # In-range version: no warning (the check only fires on drift).
+    monkeypatch.setattr(
+        inspect_task_mod, "version", lambda _name: "0.3.233", raising=True
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any UserWarning would fail the test
+        to_inspect_task(sample_meta, "do the thing")
+
+
+def test_inspect_task_guards_drifted_sample_shape(sample_meta, monkeypatch):
+    # [instrument-future-deps-002] SIMULATE a future Inspect whose Sample
+    # serialisation dropped a key the task definition consumes ('input'). The
+    # defensive shape guard must surface it (ANDON) instead of emitting an
+    # unscoreable task definition missing the Solver-facing prompt.
+    real_dump = inspect_task_mod.Sample.model_dump
+
+    def _drifted_dump(self, *args, **kwargs):  # noqa: ANN001
+        d = real_dump(self, *args, **kwargs)
+        d.pop("input", None)  # the renamed/dropped key a future Inspect might do
+        return d
+
+    monkeypatch.setattr(inspect_task_mod.Sample, "model_dump", _drifted_dump)
+    with pytest.raises(InspectTaskError) as exc:
+        to_inspect_task(sample_meta, "do the thing")
+    assert "STATE_INSPECT_SAMPLE_SHAPE" in str(exc.value)
+    assert "hint:" in str(exc.value)
+
+
+def test_inspect_task_guards_non_dict_sample_dump(sample_meta, monkeypatch):
+    # [instrument-future-deps-002] sibling: a Sample.model_dump() that returns a
+    # non-dict (e.g. a list under a future schema) must also be rejected with the
+    # same structured error, not AttributeError on the downstream .pop/indexing.
+    monkeypatch.setattr(
+        inspect_task_mod.Sample, "model_dump", lambda self, *a, **k: ["not", "a", "dict"]
+    )
+    with pytest.raises(InspectTaskError) as exc:
+        to_inspect_task(sample_meta, "do the thing")
+    assert "STATE_INSPECT_SAMPLE_SHAPE" in str(exc.value)

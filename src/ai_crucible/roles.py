@@ -108,8 +108,12 @@ class _ChromeGuard:
             new_messages = self._state.messages[self._messages_len :]
             if new_messages and _mentions_chrome(new_messages, chrome):
                 raise ChromeAccessError(
-                    "Tier-3 chrome leaked into the scored context (§10.1(e)): "
-                    "rank/leaderboard/standings must never enter messages"
+                    "[CHROME_ACCESS] Tier-3 chrome leaked into the scored context "
+                    "during a role's turn (§10.1(e)): rank/leaderboard/standings "
+                    "must never enter the messages the model solves in "
+                    "(hint: do not interpolate a chrome value into state.messages — "
+                    "keep it on state.chrome (the human-facing wrapper) and emit only "
+                    "task content from the role's act())"
                 )
         return False
 

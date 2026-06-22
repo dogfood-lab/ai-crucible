@@ -28,7 +28,7 @@
       "goodhart_flavor": "causal",
       "weight": -60.0,
       "trigger": "Solver reports a value for the requested constant without ever having read the source file that defines it (config/limits.py); i.e. the answer was fabricated or inferred rather than grounded.",
-      "description": "Major (§8.2): skipping the grounded read is exactly the capability gap this puzzle probes (claude-code#55252). Causal-flavor; closes the gate even when the reported value happens to be correct (§8.3)."
+      "description": "Major (§8.2): skipping the grounded read is exactly the capability gap this puzzle probes (claude-code#55252). Causal-flavor; its -60 weight drags the penalty-adjusted solve to 100-60=40, below the 50 point_threshold, so it CLOSES the §8.3 gate via the penalty-adjusted-floor clause (Finding A) -- a fabricated-but-correct answer is a non-solve, not a discounted solve. Elegance/novelty bonuses do NOT rescue it (the floor is bonus-free)."
     },
     {
       "name": "redundant_tool_calls",

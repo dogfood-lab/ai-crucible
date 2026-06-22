@@ -1,0 +1,37 @@
+[
+  {
+    "id": "newcombe-diff-ci",
+    "title": "Newcombe-1998 hybrid-score CI for the difference of two INDEPENDENT proportions",
+    "stated_property": "Given Claude (s1/n1) and an independent cross-family cohort (s2/n2), this returns a confidence interval for delta = p1 - p2 that is well-calibrated at small N (N~20). It must NOT be the (statistically wrong) non-overlapping-Wilson-intervals heuristic. Newcombe 1998 method 10 combines the two single-proportion Wilson intervals.",
+    "code": "def newcombe_wilson_diff(s1,n1,s2,n2,conf=0.95):\n    p1=s1/n1; p2=s2/n2; delta=p1-p2\n    l1,u1 = wilson_interval(s1,n1,conf=conf)   # Wilson score interval for p1\n    l2,u2 = wilson_interval(s2,n2,conf=conf)   # Wilson score interval for p2\n    lower = delta - sqrt((p1-l1)**2 + (u2-p2)**2)\n    upper = delta + sqrt((u1-p1)**2 + (p2-l2)**2)\n    return (max(-1,lower), min(1,upper), delta)",
+    "question": "Is this the correct Newcombe-1998 method-10 (square-and-add / MOVER-style) interval for the difference of two independent binomial proportions? Are the cross-terms (p1-l1) with (u2-p2) for the lower bound, and (u1-p1) with (p2-l2) for the upper bound, paired correctly? Is using this CI's exclusion-of-zero a sound test of difference (vs the rejected interval-overlap heuristic)?"
+  },
+  {
+    "id": "eprocess-validity",
+    "title": "Anytime-valid e-process for saturation (H0: p <= p0 vs H1: p = p1, p1 > p0)",
+    "stated_property": "The catalog peeks after every run, so saturation cannot use a fixed-N Wilson interval (stopping-time-dependent, inflates false-demotion). bernoulli_log_eprocess returns the LOG of the per-run likelihood-ratio e-value; the product across runs (sum of logs) is a valid e-process for the composite H0: p <= p0. Demote when accumulated e-value >= 1/alpha = 20.",
+    "code": "# per-run log e-value, H0: p<=p0 (=0.90), H1 point p1 (=0.97):\ndef bernoulli_log_eprocess(s,n,p0,p1):\n    failures = n - s\n    return s*log(p1/p0) + failures*log((1-p1)/(1-p0))\n# accumulate across RUNS (one call per k-attempt run, not per attempt):\nlog_e = sum(bernoulli_log_eprocess(s_i, n_i, 0.90, 0.97) for run i)\ne_value = exp(log_e)\ndemote = e_value >= 20 AND n_runs >= 2 AND total_n >= 3*min_k AND is_frontier",
+    "question": "Is E_run = (p1/p0)^s * ((1-p1)/(1-p0))^(n-s) a valid e-value for the one-sided composite null H0: p <= p0? Specifically, is E_p[E_run] <= 1 for ALL p <= p0 (not just at p = p0)? Is the product of per-run e-values a valid e-process (test supermartingale) so that 'demote when e_value >= 1/alpha' controls the type-I (false-demotion) error at alpha=0.05 at ANY stopping time? Any flaw in treating the k-attempt run (not the single attempt) as the e-process unit?"
+  },
+  {
+    "id": "graduation-precedence",
+    "title": "Three-valued abstention-aware Lab->Arena promotion",
+    "stated_property": "PROMOTE iff (claude_band_ok) AND (cohort_nontrivial) AND (fairness_ok, a CONFIDENT cross-family 'fair' verdict) AND (not deferred). A confident NEGATIVE (Claude band fails / cohort trivially aces / panel confidently 'unfair') -> HOLD. Anything that passes clauses 1-2 but lacks a confident fairness verdict (sub-quorum panel, escalating, OR fairness abstained=None, OR no cohort solve evidence) -> DEFER_TO_DESIGNER (escalate, never fake confidence).",
+    "code": "claude_band_ok = claude_n>0 and graduates(claude_s, claude_n)  # 0.10<=wilson_lower & wilson_upper<=0.90\ncohort_nontrivial = cohort_n>0 and wilson_upper(cohort_s,cohort_n) <= 0.90\nfairness_ok = panel.present and panel.meets_quorum and not panel.escalate and panel.fairness=='fair'\nconfident_unfair = panel.present and panel.meets_quorum and not panel.escalate and panel.fairness=='unfair'\ndeferred = panel.deferred or cohort_n==0   # panel.deferred = not present or not quorum or escalate\nif not claude_band_ok: HOLD\nelif cohort_n>0 and not cohort_nontrivial: HOLD\nelif confident_unfair: HOLD\nelif fairness_ok and cohort_n>0 and not deferred: PROMOTE\nelse: DEFER_TO_DESIGNER",
+    "question": "Does this precedence correctly implement 'PROMOTE iff all four clauses confidently pass, HOLD on a confident negative, DEFER on any low-confidence cross-family signal'? Is there ANY input (panel present/quorum/escalate/fairness in {fair,unfair,None}, cohort_n=0 or >0) that reaches PROMOTE WITHOUT a confident 'fair' verdict, or that reaches HOLD/PROMOTE when it should DEFER? Is routing a sub-quorum panel to DEFER (rather than asserting confidence) the methodologically honest choice?"
+  },
+  {
+    "id": "differential-classification",
+    "title": "Four-valued differential typology off the delta-CI",
+    "stated_property": "Classify Claude-vs-cohort into CLAUDE_SPECIFIC_GAP / CLAUDE_STRENGTH / LLM_GENERAL_GAP / INCONCLUSIVE_UNDERPOWERED, driven by the Newcombe delta-CI (NOT interval overlap), UNPAIRED Fisher p-value (McNemar reserved for genuinely paired). Directional only when the delta-CI excludes 0 AND |delta| >= mde_floor (0.30). LLM_GENERAL requires POSITIVE shared-failure evidence (both Wilson uppers <= 0.20), never a mere null delta.",
+    "code": "lower,upper,delta = newcombe_wilson_diff(claude_s,claude_n,cohort_s,cohort_n)\nexcludes_zero = lower>0 or upper<0\ndirectional = excludes_zero and abs(delta) >= 0.30\nif directional and upper<0: CLAUDE_SPECIFIC_GAP   # delta=claude-cohort<0: claude underperforms\nelif directional and lower>0: CLAUDE_STRENGTH\nelif (not excludes_zero) and wilson_upper(claude)<=0.20 and wilson_upper(cohort)<=0.20: LLM_GENERAL_GAP\nelse: INCONCLUSIVE_UNDERPOWERED\n# catalog-level: BH-FDR over DIRECTIONAL puzzles only; non-survivors -> INCONCLUSIVE",
+    "question": "Is the directional logic correct: upper<0 means delta<0 means Claude underperforms the cohort (CLAUDE_SPECIFIC_GAP)? Is requiring BOTH 'CI excludes 0' AND '|delta|>=mde_floor' sound (a statistically-significant but trivially-small gap stays INCONCLUSIVE)? Is requiring positive shared-failure evidence (both Wilson uppers <= ceiling) for LLM_GENERAL_GAP correct, vs accepting a bare null delta? Is applying BH-FDR across ONLY the directional puzzles (not LLM_GENERAL/INCONCLUSIVE) the right multiple-comparison scope?"
+  },
+  {
+    "id": "benjamini-hochberg",
+    "title": "Benjamini-Hochberg FDR step-up",
+    "stated_property": "Controls the false-discovery rate at q across the per-puzzle directional p-values. Standard BH step-up: reject the k smallest p-values where k is the largest rank with p_(k) <= (k/m)*q.",
+    "code": "order = argsort(pvalues)  # ascending\nmax_k = 0\nfor rank,idx in enumerate(order, start=1):\n    if pvalues[idx] <= (rank/m)*q: max_k = rank\nsurvived = [False]*m\nfor rank,idx in enumerate(order, start=1):\n    if rank <= max_k: survived[idx]=True\nreturn survived",
+    "question": "Is this the correct Benjamini-Hochberg (1995) step-up procedure? Does it correctly reject ALL hypotheses with rank <= the largest rank satisfying p_(k) <= (k/m)*q (i.e. it must reject smaller-p hypotheses even if THEIR own (k/m)q test failed, as long as a larger-rank one passed)? Any off-by-one in the 1-based ranking?"
+  }
+]

@@ -314,7 +314,13 @@ class LocalSandbox:
 
         def _write() -> None:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            # newline="" disables platform newline translation: on Windows, the
+            # default write_text rewrites "\n" -> "\r\n", which CORRUPTS any script
+            # or LF-sensitive file written through the sandbox channel (a staged
+            # bash setup_script becomes `set -euo pipefail\r`, which bash rejects).
+            # The Solver's bytes must land verbatim — the sandbox is a faithful
+            # write channel, not a text-mode editor (epic-1 staging finding).
+            target.write_text(content, encoding="utf-8", newline="")
 
         await asyncio.to_thread(_write)
 

@@ -27,12 +27,25 @@ dependency).
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
 from typing import Any
 
 import pytest
 
 from ai_crucible.characterize.types import JudgmentRecord
 from ai_crucible.models import ClaudeModel, OllamaModel
+from ai_crucible.models.ollama_adapter import (
+    ModelMismatchError,
+    OllamaBadResponseError,
+    OllamaUnreachableError,
+    _call_with_retry,
+    _extract_tool_calls,
+    _is_transient,
+    _norm_model,
+    _normalize_harmony,
+    _normalize_sdk_response,
+)
 from ai_crucible.scoring.judge_panel import JudgePanel, judge_family
 from ai_crucible.types import AttemptState, Budget, FramingArm, Score
 
@@ -469,3 +482,756 @@ def test_judge_does_not_read_chrome(attempt: AttemptState) -> None:
 
     sent = str(client.calls[0]["messages"])
     assert "SECRET_RIVAL" not in sent
+
+
+# --------------------------------------------------------------------------- #
+# Served-vs-requested model provenance guard (models-cli-002, §11.6).
+#
+# Under load->judge->evict / OLLAMA_NUM_PARALLEL=1, a load timeout / alias drift /
+# previously-loaded model answering makes Ollama return HTTP 200 with a DIFFERENT
+# `model` field. The adapter must NOT silently stamp the JudgmentRecord with the
+# requested model_id/family (that corrupts the measurement AND the EXTERNAL_VERIFIER
+# family tag) — it raises ModelMismatchError so the kernel's andon can halt. A served
+# tag that differs only by a trailing cloud suffix (the daemon serves `glm-5` for
+# `glm-5:cloud`) is the SAME model and must NOT raise.
+# --------------------------------------------------------------------------- #
+
+
+class FakeOllamaServedClient:
+    """Ollama ``/api/chat`` fake that echoes a ``model`` field (real-server shape).
+
+    Ollama's response carries the *served* model at the top level. ``served`` defaults
+    to whatever model was requested (faithful server); a test sets it to a DIFFERENT tag
+    to drive the silent-fallback path the provenance guard must catch (models-cli-002).
+    """
+
+    def __init__(self, content: str = "ok", served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        served = self.served if self.served is not None else kwargs["model"]
+        return {
+            "model": served,
+            "message": {"role": "assistant", "content": self.content},
+        }
+
+
+def test_ollama_served_mismatch_raises(attempt: AttemptState) -> None:
+    """A served model != requested model raises ModelMismatchError (RED before the fix).
+
+    The fake daemon is asked for ``qwen3:32b`` but answers with ``hermes3:8b`` (a real
+    tier-timeout fallback). The adapter MUST refuse to attribute this judgment to the
+    requested model — the provenance + same-family-exclusion seal (models-cli-002)."""
+    client = FakeOllamaServedClient(content="contaminated", served="hermes3:8b")
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    with pytest.raises(ModelMismatchError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.requested == "qwen3:32b"
+    assert exc.value.served == "hermes3:8b"
+
+
+def test_ollama_judge_item_served_mismatch_raises() -> None:
+    """The guard also fires on the characterization path: a mis-served judge_item never
+    yields a JudgmentRecord stamped with the (wrong) requested model_id/family."""
+    client = FakeOllamaServedClient(content="A", served="mistral-small:24b")
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    with pytest.raises(ModelMismatchError):
+        asyncio.run(model.judge_item("Q: which? A or B"))
+
+
+def test_ollama_served_matches_does_not_raise(attempt: AttemptState) -> None:
+    """A faithful server (served == requested) flows through unchanged — the guard fails
+    closed only on a POSITIVE mismatch, not on every response."""
+    client = FakeOllamaServedClient(content="clean")  # echoes the requested model
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    out = asyncio.run(model.generate(attempt))
+    assert out == "clean"
+
+
+def test_ollama_cloud_suffix_is_not_a_mismatch(attempt: AttemptState) -> None:
+    """The daemon serves a cloud tag WITHOUT its suffix (``glm-5`` for ``glm-5:cloud``,
+    ``qwen3-coder:480b`` for ``qwen3-coder:480b-cloud``); that is the SAME model and must
+    NOT raise — only a genuine fallback to a different model does."""
+    for requested, served in (
+        ("glm-5:cloud", "glm-5"),
+        ("qwen3-coder:480b-cloud", "qwen3-coder:480b"),
+        ("qwen3:32b", "qwen3:32b:latest"),
+    ):
+        client = FakeOllamaServedClient(content="fine", served=served)
+        model = OllamaModel(requested, family="glm", client=client)
+        # Must complete without raising.
+        assert asyncio.run(model.generate(attempt)) == "fine"
+
+
+def test_ollama_missing_served_field_tolerated(attempt: AttemptState) -> None:
+    """An older server / minimal fake that omits the ``model`` field is tolerated — the
+    guard fails closed only on a positive mismatch, never on absence of provenance."""
+    client = FakeOllamaClient("no-model-field")  # base fake: message only, no `model`
+    model = OllamaModel("qwen3:32b", family="qwen", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "no-model-field"
+
+
+def test_norm_model_strips_cloud_and_latest_suffixes() -> None:
+    """The normalization shape (mirrors swarm/verify_findings.py._norm): trailing
+    ``:latest`` and a trailing ``-cloud``/``:cloud`` collapse; a different model does not."""
+    assert _norm_model("glm-5:cloud") == _norm_model("glm-5")
+    assert _norm_model("qwen3-coder:480b-cloud") == _norm_model("qwen3-coder:480b")
+    assert _norm_model("qwen3:32b:latest") == _norm_model("qwen3:32b")
+    assert _norm_model("qwen3:32b") != _norm_model("hermes3:8b")
+    assert _norm_model(None) == ""
+
+
+class FakeClaudeServedClient:
+    """Anthropic Messages fake that echoes a ``model`` field on the response.
+
+    The real Messages API returns the model that answered in a top-level ``model`` field;
+    ``served`` defaults to the requested model (faithful) or is set to a different id to
+    drive the silent-route-to-a-different-model path the provenance guard must catch."""
+
+    def __init__(self, content: str = "ok", served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+        self.messages = _FakeServedMessages(self)
+
+
+class _FakeServedMessages:
+    def __init__(self, parent: FakeClaudeServedClient) -> None:
+        self._parent = parent
+
+    async def create(self, **kwargs: Any) -> dict[str, Any]:
+        self._parent.calls.append(kwargs)
+        served = self._parent.served if self._parent.served is not None else kwargs["model"]
+        return {
+            "model": served,
+            "content": [{"type": "text", "text": self._parent.content}],
+        }
+
+
+def test_claude_served_mismatch_raises(attempt: AttemptState) -> None:
+    """Claude must surface a silent route to a different model too — the ``"claude"``
+    family tag can never be attributed to a judgment a different model produced
+    (models-cli-002, the shared family contract point C)."""
+    client = FakeClaudeServedClient(content="x", served="claude-haiku-3-5")
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    with pytest.raises(ModelMismatchError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.requested == "claude-opus-4-8"
+    assert exc.value.served == "claude-haiku-3-5"
+
+
+def test_claude_served_matches_does_not_raise(attempt: AttemptState) -> None:
+    """A faithful Messages response (served == requested) flows through unchanged."""
+    client = FakeClaudeServedClient(content="fine")  # echoes requested model
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "fine"
+
+
+def test_claude_missing_served_field_tolerated(attempt: AttemptState) -> None:
+    """The existing FakeClaudeClient omits ``model`` — tolerated, not a mismatch."""
+    client = FakeClaudeClient("legacy-shape")  # no `model` key in its response
+    model = ClaudeModel("claude-opus-4-8", client=client)
+
+    assert asyncio.run(model.generate(attempt)) == "legacy-shape"
+
+
+def test_claude_family_tag_is_correct() -> None:
+    """ClaudeModel exposes a correct fixed family tag for EXTERNAL_VERIFIER exclusion —
+    on the instance, the pin metadata, and the as_judge() callable (shared contract C)."""
+    model = ClaudeModel("claude-opus-4-8", client=FakeClaudeClient())
+    assert model.family == "claude"
+    assert model.pin_metadata()["family"] == "claude"
+    assert judge_family(model.as_judge()) == "claude"
+
+
+# --------------------------------------------------------------------------- #
+# Resilience: BOUNDED retry/backoff (models-ollama-resilience-001), structured
+# daemon-down + malformed-body errors (002/003), SDK-shape guard (004).
+#
+# A single transient blip over a multi-hour sequential characterization run must cost
+# ~1s, not the whole model's run; an EXHAUSTED / non-transient failure must surface a
+# structured, hint-bearing error (Ship-Gate B: code/message/hint, no raw stacks), never a
+# bare httpx.ConnectError / JSONDecodeError / TypeError. Every client is faked and the
+# backoff `sleep` is a zero-cost stub — the suite makes no network call and never sleeps.
+# --------------------------------------------------------------------------- #
+
+
+async def _no_sleep(_delay: float) -> None:
+    """A zero-cost stand-in for asyncio.sleep so retry tests never block."""
+    return None
+
+
+class FlakyOllamaClient:
+    """An Ollama client that raises a TRANSIENT error N times, then succeeds.
+
+    Models the common case the bounded retry exists for: a connection reset / 503-while-
+    loading on call k that clears by call k+1. Raises the structured
+    :class:`OllamaUnreachableError` (the transient signal the httpx fallback emits) for the
+    first ``fail_times`` calls, then returns a normal /api/chat body.
+    """
+
+    def __init__(self, fail_times: int, content: str = "recovered") -> None:
+        self.fail_times = fail_times
+        self.content = content
+        self.calls = 0
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise OllamaUnreachableError("http://localhost:11434", kwargs["model"])
+        return {"message": {"role": "assistant", "content": self.content}}
+
+
+def test_ollama_retries_transient_blip_then_succeeds(attempt: AttemptState) -> None:
+    """A client failing twice then succeeding is retried within the bound and succeeds
+    (models-ollama-resilience-001) — the blip costs retries, not the model's whole run."""
+    client = FlakyOllamaClient(fail_times=2, content="recovered")
+    model = OllamaModel(
+        "qwen3:32b", family="qwen", client=client, max_retries=2, sleep=_no_sleep
+    )
+
+    out = asyncio.run(model.generate(attempt))
+
+    assert out == "recovered"
+    assert client.calls == 3  # 1 initial + 2 retries
+
+
+def test_ollama_retry_exhaustion_raises_structured_error(attempt: AttemptState) -> None:
+    """Failing PAST the bound surfaces the structured error (not a bare transport error):
+    the last transient OllamaUnreachableError is re-raised after the attempts are spent."""
+    client = FlakyOllamaClient(fail_times=99)  # never recovers within the bound
+    model = OllamaModel(
+        "qwen3:32b", family="qwen", client=client, max_retries=2, sleep=_no_sleep
+    )
+
+    with pytest.raises(OllamaUnreachableError):
+        asyncio.run(model.generate(attempt))
+
+    assert client.calls == 3  # 1 initial + 2 retries, then give up
+
+
+def test_ollama_does_not_retry_model_mismatch(attempt: AttemptState) -> None:
+    """A ModelMismatchError is a provenance breach the andon must see immediately — it is
+    NOT transient and must not be retried (so a mis-served judge halts at once)."""
+    client = FakeOllamaServedClient(content="x", served="hermes3:8b")
+    model = OllamaModel(
+        "qwen3:32b", family="qwen", client=client, max_retries=5, sleep=_no_sleep
+    )
+
+    with pytest.raises(ModelMismatchError):
+        asyncio.run(model.generate(attempt))
+
+    assert len(client.calls) == 1  # raised on the first call, never retried
+
+
+def test_ollama_retry_policy_is_pinned_in_metadata() -> None:
+    """The retry policy is a per-step pin recorded in pin_metadata (PIN_PER_STEP)."""
+    model = OllamaModel(
+        "qwen3:32b", family="qwen", client=FakeOllamaClient(), max_retries=4,
+        retry_backoff_base=0.25,
+    )
+    retry = model.pin_metadata()["retry"]
+    assert retry["max_retries"] == 4
+    assert retry["backoff_base"] == 0.25
+
+
+def test_call_with_retry_backs_off_with_injected_sleep() -> None:
+    """The backoff delays follow base * 2**i and are awaited via the injected sleep."""
+    delays: list[float] = []
+
+    async def _record(delay: float) -> None:
+        delays.append(delay)
+
+    calls = {"n": 0}
+
+    async def _flaky() -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise OllamaUnreachableError("http://h", "m")
+        return {"ok": True}
+
+    out = asyncio.run(
+        _call_with_retry(_flaky, max_retries=3, backoff_base=0.5, sleep=_record)
+    )
+    assert out == {"ok": True}
+    assert delays == [0.5, 1.0]  # backoff before retry 0 and retry 1; 3rd call succeeded
+
+
+def test_is_transient_classifies_correctly() -> None:
+    """OllamaUnreachableError is transient; ModelMismatchError / OllamaBadResponseError
+    are not (a provenance breach / a shape error are not blips)."""
+    assert _is_transient(OllamaUnreachableError("h", "m")) is True
+    assert _is_transient(ModelMismatchError("a", "b")) is False
+    assert _is_transient(OllamaBadResponseError("m", "h", "bad")) is False
+    assert _is_transient(ValueError("nope")) is False
+
+
+# -- 002 / 003: the real httpx fallback path (no SDK installed → _via_httpx) -- #
+
+
+def _patch_httpx_transport(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    """Force the adapter's lazily-built httpx.AsyncClient onto a MockTransport.
+
+    The _via_httpx closure constructs its own ``httpx.AsyncClient(base_url=..., timeout=)``;
+    patching the class to inject a :class:`httpx.MockTransport` lets us drive connect
+    failures / malformed bodies with NO network call. ``handler(request)`` returns an
+    ``httpx.Response`` or raises a transport error.
+    """
+    import httpx
+
+    real_cls = httpx.AsyncClient
+
+    def factory(**kw: Any) -> Any:
+        kw.pop("transport", None)
+        return real_cls(transport=httpx.MockTransport(handler), **kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+def test_ollama_daemon_down_surfaces_structured_unreachable(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connect failure (daemon down / wrong OLLAMA_HOST) surfaces OllamaUnreachableError
+    naming the host with an operator hint — not a bare httpx.ConnectError (002)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("Connection refused", request=request)
+
+    _patch_httpx_transport(monkeypatch, handler)
+    # No injected client → the resolver falls to _via_httpx (no ollama SDK installed).
+    # max_retries=0 so the test asserts the structured error directly, without backoff.
+    model = OllamaModel(
+        "qwen3:32b", family="qwen", host="http://localhost:11434", max_retries=0,
+        sleep=_no_sleep,
+    )
+
+    with pytest.raises(OllamaUnreachableError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.host == "http://localhost:11434"
+    assert exc.value.model_id == "qwen3:32b"
+    msg = str(exc.value)
+    assert "[OLLAMA_UNREACHABLE]" in msg
+    assert "ollama serve" in msg
+    assert "OLLAMA_HOST" in msg
+
+
+def test_ollama_non_json_body_surfaces_structured_bad_response(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An HTTP 200 with a non-JSON body (an intermediary returning HTML) surfaces
+    OllamaBadResponseError, not an opaque JSONDecodeError (003)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>proxy error</html>")
+
+    _patch_httpx_transport(monkeypatch, handler)
+    model = OllamaModel("qwen3:32b", family="qwen", max_retries=0, sleep=_no_sleep)
+
+    with pytest.raises(OllamaBadResponseError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert "[OLLAMA_BAD_RESPONSE]" in str(exc.value)
+    assert exc.value.model_id == "qwen3:32b"
+
+
+def test_ollama_non_object_json_surfaces_structured_bad_response(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An HTTP 200 whose JSON decodes to a LIST (not an object) surfaces
+    OllamaBadResponseError, not an AttributeError 20 lines later in _extract_text (003)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2, 3])
+
+    _patch_httpx_transport(monkeypatch, handler)
+    model = OllamaModel("qwen3:32b", family="qwen", max_retries=0, sleep=_no_sleep)
+
+    with pytest.raises(OllamaBadResponseError):
+        asyncio.run(model.generate(attempt))
+
+
+def test_ollama_complete_raw_guards_non_mapping_injected_client(
+    attempt: AttemptState,
+) -> None:
+    """_complete_raw guards a non-mapping reply from ANY client (here an injected one
+    returning a bare string) with a model-named OllamaBadResponseError (003)."""
+
+    async def bad_client(**kwargs: Any) -> Any:
+        return "not a mapping"
+
+    model = OllamaModel("qwen3:32b", family="qwen", client=bad_client, max_retries=0)
+
+    with pytest.raises(OllamaBadResponseError) as exc:
+        asyncio.run(model.generate(attempt))
+
+    assert exc.value.model_id == "qwen3:32b"
+
+
+# -- 004: SDK-response normalization is tolerant + fails legibly -------------- #
+
+
+class _PydanticV2Like:
+    """An object exposing pydantic-v2 ``model_dump()`` (the modern ollama SDK shape)."""
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"message": {"role": "assistant", "content": "from model_dump"}}
+
+
+class _LegacyDictLike:
+    """An object exposing a legacy pydantic ``.dict()``."""
+
+    def dict(self) -> dict[str, Any]:
+        return {"message": {"role": "assistant", "content": "from dict"}}
+
+
+class _NonConvertible:
+    """An object that is NEITHER a mapping NOR dict()-convertible — a future SDK shape
+    drift the normalizer must catch with a structured error (004)."""
+
+    __slots__ = ("x",)
+
+    def __init__(self) -> None:
+        self.x = 1
+
+
+def test_normalize_sdk_response_model_dump() -> None:
+    out = _normalize_sdk_response(_PydanticV2Like(), "qwen3:32b", "http://h")
+    assert out["message"]["content"] == "from model_dump"
+
+
+def test_normalize_sdk_response_legacy_dict() -> None:
+    out = _normalize_sdk_response(_LegacyDictLike(), "qwen3:32b", "http://h")
+    assert out["message"]["content"] == "from dict"
+
+
+def test_normalize_sdk_response_passthrough_mapping() -> None:
+    src = {"message": {"content": "already a dict"}}
+    assert _normalize_sdk_response(src, "qwen3:32b", "http://h") is src
+
+
+def test_normalize_sdk_response_non_convertible_raises_structured() -> None:
+    """A non-convertible SDK shape raises OllamaBadResponseError naming the type — not an
+    opaque TypeError deep in _extract_text (004)."""
+    with pytest.raises(OllamaBadResponseError) as exc:
+        _normalize_sdk_response(_NonConvertible(), "qwen3:32b", "http://h")
+    msg = str(exc.value)
+    assert "[OLLAMA_BAD_RESPONSE]" in msg
+    assert "_NonConvertible" in msg
+
+
+# -- 001 (Claude): the Anthropic path also retries transient failures --------- #
+
+
+def _install_fake_anthropic(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """Install a minimal fake ``anthropic`` module exposing the SDK error hierarchy.
+
+    The ``anthropic`` SDK is not a test dependency, so ``_is_transient_claude``'s lazy
+    ``import anthropic`` finds nothing and treats everything as non-transient. This fake
+    supplies the real class names (``APIConnectionError`` / ``APITimeoutError`` /
+    ``APIStatusError``) so the classifier resolves them and the retry path is exercised
+    exactly as it would be against the real SDK — still with no network call.
+    """
+    mod = types.ModuleType("anthropic")
+
+    class APIConnectionError(Exception):
+        pass
+
+    class APITimeoutError(APIConnectionError):
+        pass
+
+    class APIStatusError(Exception):
+        def __init__(self, message: str = "", *, status_code: int = 500) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    mod.APIConnectionError = APIConnectionError
+    mod.APITimeoutError = APITimeoutError
+    mod.APIStatusError = APIStatusError
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+    return mod
+
+
+class FlakyClaudeClient:
+    """An Anthropic-shaped client whose messages.create raises a transient error N times
+    then succeeds — to prove ClaudeModel.complete routes through the bounded retry."""
+
+    def __init__(self, exc: Exception, fail_times: int, content: str = "claude-ok") -> None:
+        self._exc = exc
+        self.fail_times = fail_times
+        self.content = content
+        self.calls = 0
+        self.messages = self  # messages.create == self.create
+
+    async def create(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self.fail_times:
+            raise self._exc
+        return {"content": [{"type": "text", "text": self.content}]}
+
+
+def test_claude_retries_transient_then_succeeds(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ClaudeModel.complete retries a transient Anthropic connection error within the
+    bound and succeeds (models-ollama-resilience-001, Claude side)."""
+    anthropic = _install_fake_anthropic(monkeypatch)
+    client = FlakyClaudeClient(anthropic.APIConnectionError("reset"), fail_times=2)
+    model = ClaudeModel(
+        "claude-opus-4-8", client=client, max_retries=2, sleep=_no_sleep
+    )
+
+    out = asyncio.run(model.generate(attempt))
+
+    assert out == "claude-ok"
+    assert client.calls == 3  # 1 initial + 2 retries
+
+
+def test_claude_retries_5xx_status_error(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 5xx APIStatusError is transient and retried; a non-5xx would not be (001)."""
+    anthropic = _install_fake_anthropic(monkeypatch)
+    client = FlakyClaudeClient(
+        anthropic.APIStatusError("overloaded", status_code=503), fail_times=1
+    )
+    model = ClaudeModel(
+        "claude-opus-4-8", client=client, max_retries=2, sleep=_no_sleep
+    )
+
+    out = asyncio.run(model.generate(attempt))
+    assert out == "claude-ok"
+    assert client.calls == 2
+
+
+def test_claude_does_not_retry_4xx(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 4xx (client error) is NOT transient — retrying won't help, so it surfaces at once
+    after a single call (001)."""
+    anthropic = _install_fake_anthropic(monkeypatch)
+    client = FlakyClaudeClient(
+        anthropic.APIStatusError("bad request", status_code=400), fail_times=99
+    )
+    model = ClaudeModel(
+        "claude-opus-4-8", client=client, max_retries=3, sleep=_no_sleep
+    )
+
+    with pytest.raises(anthropic.APIStatusError):
+        asyncio.run(model.generate(attempt))
+
+    assert client.calls == 1  # never retried
+
+
+def test_claude_retry_policy_pinned_in_metadata() -> None:
+    """Claude's retry policy is recorded in pin_metadata (PIN_PER_STEP)."""
+    model = ClaudeModel(
+        "claude-opus-4-8", client=FakeClaudeClient(), max_retries=4,
+        retry_backoff_base=0.25,
+    )
+    retry = model.pin_metadata()["retry"]
+    assert retry["max_retries"] == 4
+    assert retry["backoff_base"] == 0.25
+
+
+# --------------------------------------------------------------------------- #
+# Harmony control-token normalization (gpt-oss / Harmony chat-template leak).
+#
+# A gpt-oss model served via a path that does NOT strip its Harmony chat template
+# leaks control tokens into ``message.content`` — ``<|channel|>analysis<|message|>``
+# (hidden CoT), ``<|channel|>final<|message|>...<|end|>`` (the real answer), stray
+# ``<|start|>``/``<|end|>``/``<|return|>``. The ReAct parser downstream then grabs
+# garbage. ``complete()`` must surface the FINAL-channel message when the channel
+# structure is present, else strip stray ``<|...|>`` control tokens — and leave a
+# CLEAN response (no control tokens) byte-for-byte UNCHANGED (no over-stripping).
+# Every client is faked; no network call (build-law 3).
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_harmony_extracts_final_channel() -> None:
+    """The FINAL channel content is extracted; the analysis (CoT) channel is dropped."""
+    raw = (
+        "<|channel|>analysis<|message|>The user wants 3+4. That is 7.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>7<|end|>"
+    )
+    assert _normalize_harmony(raw) == "7"
+
+
+def test_normalize_harmony_final_channel_terminated_by_return() -> None:
+    """A final message terminated by ``<|return|>`` (not ``<|end|>``) is handled."""
+    raw = (
+        "<|channel|>analysis<|message|>thinking out loud<|end|>"
+        "<|channel|>final<|message|>ACTION read_file config/limits.py<|return|>"
+    )
+    assert _normalize_harmony(raw) == "ACTION read_file config/limits.py"
+
+
+def test_normalize_harmony_strips_stray_control_tokens() -> None:
+    """With no channel structure, stray ``<|...|>`` control tokens are stripped out."""
+    raw = "<|start|>assistant<|message|>FINAL 7<|end|>"
+    assert _normalize_harmony(raw) == "FINAL 7"
+
+
+def test_normalize_harmony_clean_text_unchanged() -> None:
+    """A clean response (no control tokens) passes through byte-for-byte (no stripping)."""
+    clean = "ACTION read_file config/limits.py"
+    assert _normalize_harmony(clean) is clean
+    multiline = "I should read the file.\nACTION read_file config/limits.py"
+    assert _normalize_harmony(multiline) is multiline
+
+
+def test_normalize_harmony_empty_and_whitespace_unchanged() -> None:
+    """Empty / whitespace text has no control tokens → returned unchanged."""
+    assert _normalize_harmony("") == ""
+    assert _normalize_harmony("   ") == "   "
+
+
+class FakeHarmonyClient:
+    """An Ollama ``/api/chat`` fake whose ``message.content`` leaks Harmony tokens.
+
+    Models the observed gpt-oss serving-path defect: the Harmony chat template was not
+    parsed away, so analysis + final channels and stray control tokens land verbatim in
+    ``content``. The adapter's :meth:`OllamaModel.complete` must normalize this to the
+    final-channel message before the ReAct parser ever sees it.
+    """
+
+    def __init__(self, content: str, served: str | None = None) -> None:
+        self.content = content
+        self.served = served
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        resp: dict[str, Any] = {
+            "message": {"role": "assistant", "content": self.content}
+        }
+        if self.served is not None:
+            resp["model"] = self.served
+        return resp
+
+
+def test_ollama_complete_normalizes_harmony_leak(attempt: AttemptState) -> None:
+    """complete() returns the clean final-channel content, no ``<|`` tokens (the fix).
+
+    RED against the current adapter (which returns the raw leaked content verbatim);
+    GREEN once complete() routes the extracted text through :func:`_normalize_harmony`.
+    """
+    leaked = (
+        "<|channel|>analysis<|message|>User wants just the number. 3+4 = 7.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>7<|end|>"
+    )
+    client = FakeHarmonyClient(leaked)
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    out = asyncio.run(model.complete(attempt.messages))
+
+    assert out == "7"
+    assert "<|" not in out
+
+
+def test_ollama_complete_clean_response_passes_through(attempt: AttemptState) -> None:
+    """A clean (control-token-free) response is returned verbatim — no over-stripping."""
+    client = FakeHarmonyClient("ACTION read_file config/limits.py")
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    out = asyncio.run(model.complete(attempt.messages))
+
+    assert out == "ACTION read_file config/limits.py"
+
+
+def test_ollama_judge_item_normalizes_harmony_leak() -> None:
+    """The characterization path also gets the cleaned prediction (one normalize seam)."""
+    leaked = "<|channel|>final<|message|>PASS<|end|>"
+    client = FakeHarmonyClient(leaked)
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+
+    record = asyncio.run(model.judge_item("grade: PASS or FAIL"))
+
+    assert record.predicted == "PASS"
+    assert "<|" not in record.predicted
+
+
+# --------------------------------------------------------------------------- #
+# Finding B' — native tool-call extraction + complete_turn
+# --------------------------------------------------------------------------- #
+
+
+class FakeToolCallClient:
+    """A fake Ollama client that answers with NATIVE tool_calls + empty content (gpt-oss).
+
+    Records every call's kwargs so a test can assert the ``tools`` schemas were offered.
+    Echoes the requested model so the served-vs-requested provenance guard passes.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return {
+            "model": kwargs.get("model", ""),
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "read_file",
+                                  "arguments": {"path": "config/limits.py"}}}
+                ],
+            },
+        }
+
+
+def test_extract_tool_calls_normalizes_dict_and_json_args() -> None:
+    dict_args = {"message": {"content": "", "tool_calls": [
+        {"function": {"name": "read_file", "arguments": {"path": "a.py"}}}]}}
+    assert _extract_tool_calls(dict_args) == [{"name": "read_file", "arguments": {"path": "a.py"}}]
+    # Some servers serialize arguments as a JSON string — decode it.
+    json_args = {"message": {"content": "", "tool_calls": [
+        {"function": {"name": "exec", "arguments": '{"command": "ls"}'}}]}}
+    assert _extract_tool_calls(json_args) == [{"name": "exec", "arguments": {"command": "ls"}}]
+
+
+def test_extract_tool_calls_empty_when_none_and_skips_malformed() -> None:
+    assert _extract_tool_calls({"message": {"content": "hi"}}) == []   # text path → []
+    assert _extract_tool_calls({}) == []
+    # A malformed entry (no function / no name) is skipped, not raised.
+    bad = {"message": {"tool_calls": [{"nope": 1}, {"function": {"arguments": {}}}]}}
+    assert _extract_tool_calls(bad) == []
+
+
+def test_complete_turn_returns_text_and_tool_calls_and_offers_tools() -> None:
+    from ai_crucible.solver_loop import SANDBOX_TOOL_SCHEMAS
+
+    client = FakeToolCallClient()
+    model = OllamaModel("gpt-oss:120b-cloud", family="gpt-oss", client=client)
+    text, tool_calls = asyncio.run(
+        model.complete_turn([{"role": "user", "content": "solve"}], tools=SANDBOX_TOOL_SCHEMAS)
+    )
+    assert text == ""  # gpt-oss returns empty content + native tool_calls
+    assert tool_calls == [{"name": "read_file", "arguments": {"path": "config/limits.py"}}]
+    # The tool schemas were actually passed to the daemon as a top-level `tools` kwarg.
+    assert client.calls[0]["tools"] is SANDBOX_TOOL_SCHEMAS
+
+
+def test_complete_turn_without_tools_is_text_only() -> None:
+    """No tools offered → a normal text completion, no tool_calls (and no `tools` kwarg)."""
+    client = FakeOllamaClient(content="the answer is 7")
+    model = OllamaModel("qwen3-coder:480b", family="qwen", client=client)
+    text, tool_calls = asyncio.run(model.complete_turn([{"role": "user", "content": "x"}]))
+    assert text == "the answer is 7"
+    assert tool_calls == []
+    assert "tools" not in client.calls[0]  # omitted on the text path

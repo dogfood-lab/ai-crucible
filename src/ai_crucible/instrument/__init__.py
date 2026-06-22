@@ -14,7 +14,8 @@ The four §9.2 stages, mapped to modules:
   garden-of-forking-paths defense).
 * :mod:`ai_crucible.instrument.rubric_bundle` — **Stage 2, the content-hashed
   bundle** (§9.1, §9.4): ``RubricBundle`` + ``compile_bundle`` (sha256) +
-  ``bump_on_change`` (no silent retconning — the version changes iff the hash
+  ``bump_on_change`` (advises the next label) + ``assert_versioned`` (the
+  fail-closed seal — no silent retconning, the version changes iff the hash
   changes).
 * :mod:`ai_crucible.instrument.tuning` — **Stage 2, the 7-step tuning protocol**
   (§9.4): a real Sobol total-effect screen (``sobol_screen``), a real
@@ -49,6 +50,7 @@ from ai_crucible.instrument.prereg import (
 from ai_crucible.instrument.rubric_bundle import (
     RubricBundle,
     RubricBundleError,
+    assert_versioned,
     bump_on_change,
     canonical_bundle_json,
     compile_bundle,
@@ -84,6 +86,7 @@ __all__ = [
     "canonical_bundle_json",
     "compile_bundle",
     "bump_on_change",
+    "assert_versioned",
     # tuning (Stage 2)
     "TuningError",
     "TuningBudgetError",

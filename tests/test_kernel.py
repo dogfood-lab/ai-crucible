@@ -44,6 +44,7 @@ from ai_crucible.engagement import SealedBoundaryViolation, build_chrome
 from ai_crucible.kernel import run_attempt, run_pass_hat_k
 from ai_crucible.observability import PuzzleHistory
 from ai_crucible.puzzle import LoadedPuzzle, load_puzzle
+from ai_crucible.roles import ChromeAccessError
 from ai_crucible.scoring.judge_panel import JudgePanel
 from ai_crucible.scoring.oracle import OracleOutcome
 from ai_crucible.types import (
@@ -519,22 +520,28 @@ def _in_place_leaking_generate(token: str, *, return_text: str = _CORRECT_ANSWER
 
 def _critic_leaking_generate(token: str):
     """A fake ``generate`` shared by Solver+Critic that leaks only on the CRITIC
-    turn: the first call (Solver) returns clean; the second call (Critic) splices
-    ``token`` into an existing message in place. Isolates the post-Critic re-check.
-    """
+    turn through the Critic's REAL message shape: the first call (Solver) returns
+    clean; the second call (Critic) RETURNS a critique string carrying ``token``.
+
+    This is the actual Critic leak vector (kernel-core-002): the enabled Critic
+    routes ``generate``'s return value into ``Critic.message(critique)`` →
+    ``{'role': 'critic', 'critique': critique, 'anonymized': ...}`` and appends it
+    to ``state.messages`` (roles.py). The text lives under ``critique``, NOT
+    ``content``. The earlier version of this fixture leaked via an in-place edit of
+    ``messages[0]['content']`` — a path ``content``-only scanning already covered —
+    so it never exercised the field the Critic itself writes. Returning the token
+    in the critique drives the leak through the genuine appended-message shape, so
+    the kernel post-Critic re-check must catch it (RED until engagement scans the
+    ``critique`` field; GREEN after, per kernel-core-001/-002)."""
     state = {"calls": 0}
 
     async def _gen(attempt: AttemptState) -> str:
         state["calls"] += 1
         if state["calls"] == 1:
             return _CORRECT_ANSWER  # Solver: clean
-        # Critic turn: in-place leak the kernel's post-Critic re-check must catch.
-        if attempt.messages:
-            attempt.messages[0] = dict(attempt.messages[0])
-            attempt.messages[0]["content"] = (
-                str(attempt.messages[0].get("content", "")) + f" [leak: {token}]"
-            )
-        return "a critique"
+        # Critic turn: the leak rides in the RETURNED critique string, which the
+        # Critic appends as {role:'critic', 'critique': <this>, ...}.
+        return f"The leading entry is from {token}; surpass it."
 
     return _gen
 
@@ -563,19 +570,34 @@ def test_chrome_leak_after_solver_turn_raises(sample_dir: Path) -> None:
 
 
 def test_chrome_leak_after_critic_turn_raises(sample_dir: Path) -> None:
-    """A leak introduced by the CRITIC turn (in-place edit) is caught by the
-    kernel's POST-Critic re-check → SealedBoundaryViolation (H1, §10.1(e)).
+    """A leak in the CRITIC's OWN appended message (text under ``critique``) is
+    caught by the kernel's POST-Critic re-check → SealedBoundaryViolation
+    (H1, §10.1(e); kernel-core-002).
 
-    The Solver runs clean; the enabled Critic mutates an existing message in place.
-    Only the kernel's post-Critic re-check covers this message-mutating site."""
+    The Solver runs clean; the enabled Critic returns a critique string carrying a
+    chrome token, which it appends as ``{role:'critic', 'critique': ..., ...}`` —
+    the field the Critic actually populates, NOT ``content``. This drives the leak
+    through the real Critic message shape (formerly the fixture leaked via an
+    in-place ``content`` edit that already-covered code caught, giving false
+    assurance).
+
+    The attempt MUST halt with a sealed-boundary andon. Both andon layers delegate
+    to the SAME engagement guard (research-grounding §10.1(e)): the Critic-turn
+    role :class:`ChromeAccessError` (it inspects the messages the Critic appended
+    this turn — including its critique) and the kernel's post-Critic
+    :class:`SealedBoundaryViolation` re-check both now scan the ``critique`` field.
+    The role guard fires first for this vector (defense in depth); accepting either
+    proves the critique field is no longer an unguarded scored-context surface.
+    Against pre-fix code (content-only scan) NEITHER guard sees the critique token,
+    so the attempt completes and this raises nothing → RED. The fix turns it GREEN."""
     loaded = load_puzzle(sample_dir)
     chrome = build_chrome(rank=11, cohort_size=12, leaderboard=[{"solver": "solver-omega"}])
-    with pytest.raises(SealedBoundaryViolation):
+    with pytest.raises((SealedBoundaryViolation, ChromeAccessError)):
         anyio.run(
             lambda: run_attempt(
                 sample_dir,
                 "m",
-                # Solver returns clean; the Critic generate does the in-place leak.
+                # Solver returns clean; the Critic's RETURNED critique carries the leak.
                 generate=_critic_leaking_generate("solver-omega"),
                 oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
                 chrome=chrome,
@@ -656,6 +678,163 @@ def test_oracle_never_in_messages(sample_dir: Path) -> None:
         assert forbidden not in blob, f"oracle marker {forbidden!r} leaked into messages"
     eval_log = attempt.metadata["eval_log"]
     assert eval_log["samples"][0]["target"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Post-Solver grading resilience (kernel-runtime-001) — RED paths
+#
+# The Solver turn is wrapped in try/finally, but the post-Solver block
+# (oracle_runner grade + panel.score + eval_log render/persist) had NO failure
+# handling: a dead grading host or a zero-survivor panel propagated straight out
+# of run_attempt, discarding the Solver's completed work with no trace, no
+# terminated_by, and no record of WHICH stage failed. These tests SIMULATE those
+# runtime failures (an oracle_runner that raises; a panel whose .score raises —
+# the zero-survivor floor B's half raises at) and assert the kernel DEGRADES into
+# a populated, traced, returned attempt naming the failing stage, with the Solver
+# transcript still rendered into an eval_log (SHARED GRADING-SEAM CONTRACT, Agent A).
+# --------------------------------------------------------------------------- #
+
+
+def raising_oracle_runner(message: str = "grading host unreachable"):
+    """A fake ``oracle_runner`` that raises — the SEPARATE grading host being
+    unreachable (network blip, host restart; §10.4). The kernel must catch this
+    into a degraded, traced attempt naming the 'oracle grading' stage."""
+
+    async def _run(_attempt: AttemptState, _meta: PuzzleMeta) -> OracleOutcome:
+        raise RuntimeError(message)
+
+    return _run
+
+
+class _RaisingPanel:
+    """A panel stub whose :meth:`score` raises — the zero-survivor floor (every
+    judge died) that Agent B's degrading :meth:`JudgePanel.score` re-raises as the
+    existing empty-panel ``ValueError``. Used directly (via ``panel=``) so the
+    kernel catch path is exercised deterministically, independent of the judge-panel
+    module's concurrent half."""
+
+    def __init__(self, message: str = "all judges errored: zero survivors") -> None:
+        self._message = message
+
+    async def score(self, _attempt: AttemptState) -> Score:
+        raise ValueError(self._message)
+
+
+def test_oracle_grading_failure_returns_degraded_traced_attempt(sample_dir: Path) -> None:
+    """A dead grading host (oracle_runner raises) does NOT discard the Solver's work:
+    run_attempt returns a POPULATED attempt with terminated_by=ERROR, a structured
+    attempt.error NAMING the 'oracle grading' stage, an error TraceEvent, and a
+    rendered eval_log preserving the Solver transcript (kernel-runtime-001)."""
+    gen = fake_generate(_CORRECT_ANSWER)
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=gen,
+            oracle_runner=raising_oracle_runner("grading host down"),
+        )
+    )
+
+    # The attempt is RETURNED (not raised) and the Solver's completed work survives.
+    assert attempt.terminated_by is TerminatedBy.ERROR
+    assert attempt.output == _CORRECT_ANSWER  # Solver transcript preserved
+    assert gen.calls["calls"] == 1
+    # A structured error naming the failing stage (code/message/hint shape).
+    assert attempt.error is not None
+    assert "oracle grading" in attempt.error
+    assert "grading host down" in attempt.error
+    # An error TraceEvent is in the kernel-owned trace.
+    assert any(e.kind == "error" for e in attempt.events)
+    # The eval_log was still rendered (and carries the Solver transcript / no oracle).
+    eval_log = attempt.metadata["eval_log"]
+    assert eval_log["samples"][0]["id"] == attempt.attempt_id
+    assert eval_log["samples"][0]["output"] == _CORRECT_ANSWER
+    assert eval_log["results"]["terminated_by"] == "error"
+
+
+def test_panel_scoring_failure_returns_degraded_traced_attempt(sample_dir: Path) -> None:
+    """A zero-survivor panel (panel.score raises) is caught into a degraded, traced,
+    returned attempt naming the 'panel scoring' stage — the Solver's work is not lost
+    and the eval_log still renders (kernel-runtime-001; pairs with Agent B's floor)."""
+    loaded = load_puzzle(sample_dir)
+    gen = fake_generate(_CORRECT_ANSWER)
+
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=gen,
+            oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+            panel=_RaisingPanel("all judges errored"),
+        )
+    )
+
+    assert attempt.terminated_by is TerminatedBy.ERROR
+    assert attempt.output == _CORRECT_ANSWER
+    assert attempt.error is not None
+    assert "panel scoring" in attempt.error
+    assert any(e.kind == "error" for e in attempt.events)
+    eval_log = attempt.metadata["eval_log"]
+    assert eval_log["samples"][0]["output"] == _CORRECT_ANSWER
+    assert eval_log["results"]["terminated_by"] == "error"
+
+
+def test_grading_failure_persists_eval_log_to_event_store(sample_dir: Path, tmp_path: Path) -> None:
+    """Even on a grading failure the kernel BEST-EFFORT persists the eval_log so the
+    Solver transcript survives durably (kernel-runtime-001 — 'still render + best-effort
+    persist')."""
+    from ai_crucible.attestation import JsonlEventStore
+
+    store = JsonlEventStore(tmp_path / "trajectory.jsonl")
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir,
+            "m",
+            generate=fake_generate(_CORRECT_ANSWER),
+            oracle_runner=raising_oracle_runner("host down"),
+            event_store=store,
+        )
+    )
+    assert attempt.terminated_by is TerminatedBy.ERROR
+    # The degraded attempt's transcript was still appended for provenance.
+    assert len(store) == 1
+    stored = store.read_events()[0]
+    assert stored["results"]["terminated_by"] == "error"
+    assert stored["samples"][0]["output"] == _CORRECT_ANSWER
+
+
+def test_pass_hat_k_isolates_a_grading_failed_sibling(sample_dir: Path) -> None:
+    """In run_pass_hat_k a single sibling's grading failure must NOT discard the whole
+    cohort: the failed sibling is recorded as a non-solve, the others still complete and
+    are counted (kernel-runtime-001 per-sibling isolation)."""
+    # An oracle_runner that raises ONLY on the 2nd of 3 siblings (a mid-cohort blip).
+    state = {"calls": 0}
+
+    async def flaky_oracle_runner(attempt: AttemptState, meta: PuzzleMeta) -> OracleOutcome:
+        state["calls"] += 1
+        if state["calls"] == 2:
+            raise RuntimeError("grading host blipped on sibling 2")
+        return clean_solve_outcome(meta)
+
+    history = anyio.run(
+        lambda: run_pass_hat_k(
+            sample_dir,
+            "m",
+            3,
+            generate=fake_generate(_CORRECT_ANSWER),
+            oracle_runner=flaky_oracle_runner,
+        )
+    )
+
+    # All three siblings are recorded — the bad one did not abort the cohort.
+    assert history.n_attempts == 3
+    # Siblings 1 and 3 are clean solves; sibling 2 is a non-solve (graded-failed → ERROR).
+    assert history.outcomes == [True, False, True]
+    # The failed sibling is terminated_by ERROR and carries the stage-naming error.
+    failed = history.attempts[1]
+    assert failed.terminated_by is TerminatedBy.ERROR
+    assert failed.error is not None and "oracle grading" in failed.error
 
 
 # --------------------------------------------------------------------------- #
@@ -986,6 +1165,35 @@ def test_framing_arm_recorded_in_attempt_and_log(sample_dir: Path) -> None:
     )
     assert attempt.framing_arm is FramingArm.NEUTRAL
     assert attempt.metadata["eval_log"]["eval"]["framing_arm"] == "neutral"
+
+
+# --------------------------------------------------------------------------- #
+# Eval-log carries a stable schema-version marker (kernel-runtime-005)
+# --------------------------------------------------------------------------- #
+
+
+def test_eval_log_carries_schema_version(sample_dir: Path) -> None:
+    """The emitted eval-log dict self-describes its schema version so a downstream
+    consumer (Inspect / a persisted attestation reader) can detect drift rather than
+    misparse silently (kernel-runtime-005, forward-compat hygiene).
+
+    The shape is hand-built to match 'Inspect EvalLog v2'; without a version key a
+    future envelope change would be silent. Assert the marker is present, stable, and
+    survives durable persistence (it rides inside the rendered dict, not a side
+    channel)."""
+    from ai_crucible.trace import EVAL_LOG_SCHEMA_VERSION
+
+    loaded = load_puzzle(sample_dir)
+    attempt = anyio.run(
+        lambda: run_attempt(
+            sample_dir, "m", generate=fake_generate(_CORRECT_ANSWER),
+            oracle_runner=oracle_runner_for(clean_solve_outcome(loaded.meta)),
+        )
+    )
+    eval_log = attempt.metadata["eval_log"]
+    # A self-describing, stable, namespaced version marker is present.
+    assert eval_log["schema_version"] == EVAL_LOG_SCHEMA_VERSION
+    assert isinstance(EVAL_LOG_SCHEMA_VERSION, str) and EVAL_LOG_SCHEMA_VERSION
 
 
 # --------------------------------------------------------------------------- #

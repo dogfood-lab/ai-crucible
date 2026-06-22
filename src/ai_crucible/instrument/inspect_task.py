@@ -52,6 +52,8 @@ Standards compliance (the six — workflow-standards.md):
 
 from __future__ import annotations
 
+import warnings
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from inspect_ai.dataset import Sample
@@ -60,9 +62,27 @@ from ai_crucible.types import PuzzleMeta
 
 __all__ = [
     "InspectTaskError",
+    "INSPECT_AI_TESTED_RANGE",
     "to_inspect_task",
     "two_repo_layout",
 ]
+
+# The inspect-ai version range this module's Sample.model_dump() consumption was
+# authored and tested against. pyproject pins `inspect-ai>=0.3` with NO upper
+# bound (a deliberate resolver constraint, not a runtime dep — see pyproject), so
+# the Sample shape this module serialises wholesale can drift under us. Per
+# arXiv:2510.25506 silent dependency-version drift is a leading cause of
+# "functional" eval artifacts failing months later; a runtime warning makes the
+# drift legible instead of producing a misparsed task definition silently. We
+# WARN (not raise) because a newer Inspect is usually compatible — the §9.6
+# deliverable is the dict shape, and the defensive shape guard below catches an
+# actual incompatibility. Bump the upper bound here when re-tested against it.
+INSPECT_AI_TESTED_RANGE: tuple[str, str] = ("0.3", "0.4")
+
+# The Sample.model_dump() keys this module's task definition depends on. If a
+# future Inspect renames/drops one of these, the wholesale-consumed shape is
+# broken and we surface it (ANDON) rather than emitting an unscoreable task.
+_REQUIRED_SAMPLE_KEYS: tuple[str, ...] = ("id", "input", "target", "metadata")
 
 
 class InspectTaskError(Exception):
@@ -72,6 +92,52 @@ class InspectTaskError(Exception):
 
 def _fail(code: str, message: str, hint: str) -> InspectTaskError:
     return InspectTaskError(f"[{code}] {message} (hint: {hint})")
+
+
+def _parse_minor(ver: str) -> tuple[int, int]:
+    """Parse the ``major.minor`` prefix of a version string to an int 2-tuple.
+
+    Tolerant of pre-release/build suffixes (``0.3.233`` -> ``(0, 3)``,
+    ``0.4.0rc1`` -> ``(0, 4)``). Returns ``(-1, -1)`` if the prefix is
+    unparseable so the caller treats it as "outside range" and warns rather than
+    crashing on a surprise version format.
+    """
+    parts = ver.split(".")
+    try:
+        major = int("".join(c for c in parts[0] if c.isdigit()) or "x")
+        minor = int("".join(c for c in parts[1] if c.isdigit()) or "x") if len(parts) > 1 else 0
+    except ValueError:
+        return (-1, -1)
+    return (major, minor)
+
+
+def _check_inspect_version() -> None:
+    """Warn (once-ish, via the warnings filter) if the installed ``inspect_ai`` is
+    outside :data:`INSPECT_AI_TESTED_RANGE`.
+
+    The Sample.model_dump() shape is consumed wholesale; an untested Inspect
+    version may have drifted it. This makes the drift legible (the §9.6
+    reproducibility concern) without hard-failing on a probably-compatible newer
+    release — the shape guard in :func:`to_inspect_task` is the actual safety net.
+    """
+    try:
+        installed = version("inspect-ai")
+    except PackageNotFoundError:  # pragma: no cover - inspect_ai is importable
+        return
+    lo = _parse_minor(INSPECT_AI_TESTED_RANGE[0])
+    hi = _parse_minor(INSPECT_AI_TESTED_RANGE[1])
+    cur = _parse_minor(installed)
+    if cur == (-1, -1) or not (lo <= cur < hi):
+        warnings.warn(
+            f"[CONFIG_INSPECT_AI_UNTESTED_VERSION] inspect-ai {installed} is "
+            f"outside the tested range "
+            f"[{INSPECT_AI_TESTED_RANGE[0]}, {INSPECT_AI_TESTED_RANGE[1]}); the "
+            "Sample.model_dump() task shape may have drifted (hint: re-validate "
+            "to_inspect_task against this version and bump "
+            "INSPECT_AI_TESTED_RANGE, or pin inspect-ai in pyproject — §9.6 "
+            "reproducibility, arXiv:2510.25506 version drift)",
+            stacklevel=2,
+        )
 
 
 def _scorer_ref(puzzle_meta: PuzzleMeta) -> str:
@@ -130,6 +196,9 @@ def to_inspect_task(puzzle_meta: PuzzleMeta, prompt: str) -> dict[str, Any]:
             "pass the Tier-1 scored-context prompt the Solver will see",
         )
 
+    # Make any inspect-ai version drift legible before we consume its shape.
+    _check_inspect_version()
+
     sample = Sample(
         input=prompt,
         target="",  # sealed-oracle invariant: the Solver never sees the answer
@@ -142,9 +211,34 @@ def to_inspect_task(puzzle_meta: PuzzleMeta, prompt: str) -> dict[str, Any]:
         },
     )
 
+    # Defensive guard around the wholesale-consumed shape: a future Inspect that
+    # renames/drops a key the task definition relies on must fail here with a
+    # legible, model-named error, not silently emit a task missing `id`/`input`
+    # that an auditor's tooling later misparses (the inspect-future-deps-002 gap).
+    sample_dict = sample.model_dump()
+    if not isinstance(sample_dict, dict):
+        raise _fail(
+            "STATE_INSPECT_SAMPLE_SHAPE",
+            f"inspect_ai Sample.model_dump() returned "
+            f"{type(sample_dict).__name__}, not a dict, for puzzle "
+            f"'{puzzle_meta.puzzle_id}'",
+            "the installed inspect-ai version produced an unexpected Sample "
+            "serialisation; re-validate against INSPECT_AI_TESTED_RANGE (§9.6)",
+        )
+    missing = [k for k in _REQUIRED_SAMPLE_KEYS if k not in sample_dict]
+    if missing:
+        raise _fail(
+            "STATE_INSPECT_SAMPLE_SHAPE",
+            f"inspect_ai Sample.model_dump() is missing key(s) {missing} for "
+            f"puzzle '{puzzle_meta.puzzle_id}'",
+            "the installed inspect-ai version drifted the Sample shape this task "
+            "definition consumes; re-validate to_inspect_task and bump "
+            "INSPECT_AI_TESTED_RANGE (§9.6 reproducibility)",
+        )
+
     return {
         "name": f"ai_crucible-{puzzle_meta.puzzle_id}",
-        "dataset": [sample.model_dump()],
+        "dataset": [sample_dict],
         # Scorer reference only — the oracle is sealed and graded out-of-band.
         "scorer": _scorer_ref(puzzle_meta),
         # Inspect SandboxEnvironmentSpec(type, config) shape; harness pins the

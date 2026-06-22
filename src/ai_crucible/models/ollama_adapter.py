@@ -46,7 +46,16 @@ Standards compliance (the six — workflow-standards.md)
   (deterministic-kwargs + metadata assertions).
 * **ANDON_AUTHORITY — n/a:** halting authority is the kernel's (budget/andon); an
   adapter is a leaf the kernel drives. A transport error surfaces as an exception
-  for the caller's andon, never a silent empty completion.
+  for the caller's andon, never a silent empty completion — and likewise a
+  *served≠requested* model surfaces as :class:`ModelMismatchError` (§11.6 /
+  models-cli-002), never a judgment silently mis-attributed to the requested model.
+  Resilience (§8.6, models-ollama-resilience): a single transient blip is absorbed by a
+  BOUNDED retry/backoff (:func:`_call_with_retry`, pinned per step) so it costs ~1s, not
+  the model's whole multi-hour run; an *exhausted* / non-transient failure surfaces as a
+  structured, hint-bearing error — :class:`OllamaUnreachableError` (daemon down / wrong
+  ``OLLAMA_HOST``) or :class:`OllamaBadResponseError` (a malformed/non-JSON/non-mapping
+  body, or an SDK shape the normalizer can't convert) — never a bare ``httpx.ConnectError``,
+  ``JSONDecodeError``, or ``TypeError`` (Ship-Gate B: code/message/hint, no raw stacks).
 * **NAMED_COMPENSATORS — n/a:** a completion is a pure read; the adapter performs no
   irreversible action (no publish/write/network mutation) to compensate.
 * **DECOMPOSE_BY_SECRETS — 2:** the adapter knows only model-serving config; it
@@ -55,13 +64,20 @@ Standards compliance (the six — workflow-standards.md)
 * **UNCERTAINTY_GATED_HUMANS — n/a:** no human checkpoint at the model-call layer.
 * **EXTERNAL_VERIFIER — 3:** the whole point — :meth:`as_judge` tags the judge with
   its ``family`` so the panel can structurally drop a same-family judge (§10.2);
-  proven by the ``JudgePanel`` exclusion test.
+  proven by the ``JudgePanel`` exclusion test. The family tag is only trustworthy if
+  the *served* model is the *requested* one, so :meth:`_complete_raw` verifies the
+  response's ``model`` field matches the request (modulo a cloud suffix) and raises
+  :class:`ModelMismatchError` on a silent fallback — a mis-served judge can never have
+  its judgment attributed to (and excluded as) the wrong family (§11.6 / models-cli-002).
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 import os
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -70,7 +86,119 @@ from ai_crucible.characterize.types import JudgmentRecord
 from ai_crucible.scoring.judge_panel import JudgeFn
 from ai_crucible.types import AttemptState, Score
 
-__all__ = ["OllamaModel", "OllamaClient"]
+__all__ = [
+    "OllamaModel",
+    "OllamaClient",
+    "ModelMismatchError",
+    "OllamaUnreachableError",
+    "OllamaBadResponseError",
+]
+
+
+class ModelMismatchError(RuntimeError):
+    """The served model does not match the requested model (provenance breach, §11.6).
+
+    Raised when Ollama answers HTTP 200 but its response ``model`` field names a tag
+    *different* from the one requested (modulo a trailing cloud suffix, see
+    :func:`_norm_model`). Under the ``load → judge → evict`` / ``OLLAMA_NUM_PARALLEL=1``
+    serving topology (§11.2) a load timeout, an alias resolving to a different tag, or a
+    previously-loaded model answering would otherwise let a JudgmentRecord be stamped
+    with the *requested* ``model_id``/``family`` while a *different* model actually
+    produced the judgment — corrupting both the measurement and the EXTERNAL_VERIFIER
+    family tag with no error (models-cli-002).
+
+    Surfacing this as an exception (rather than silently attributing the judgment to the
+    requested model) matches the adapter's stated ANDON contract — "a transport error
+    surfaces as an exception for the caller's andon, never a silent" wrong attribution —
+    so the kernel's andon can halt before a mis-attributed record propagates downstream.
+    """
+
+    def __init__(self, requested: str, served: str) -> None:
+        self.requested = requested
+        self.served = served
+        super().__init__(
+            f"served model {served!r} != requested {requested!r} "
+            f"(normalized {_norm_model(served)!r} != {_norm_model(requested)!r}): "
+            "refusing to attribute this judgment to the requested model "
+            "(provenance breach, §11.6 / models-cli-002)"
+        )
+
+
+class OllamaUnreachableError(RuntimeError):
+    """The Ollama daemon could not be reached (transport/connect failure, §8.6/§11.2).
+
+    Raised when the httpx fallback (or the SDK path) fails to *connect* to the daemon —
+    a refused connection, a connect timeout, or a transport reset before any HTTP status
+    — typically because the daemon is not running or ``OLLAMA_HOST`` points at the wrong
+    place. The reusable adapter surface (driven by the kernel and any future caller) must
+    not let a bare ``httpx.ConnectError`` escape with no operator guidance: the Ship-Gate
+    B standard for this repo requires structured errors with code/message/hint and no raw
+    stacks, and the well-built :class:`ModelMismatchError` already sets the shape (named
+    RuntimeError subclass, ``[CODE] message (hint: …)``).
+
+    The message names the *host* and *model* so the operator knows exactly which endpoint
+    failed, and the hint points straight at the fix (``ollama serve`` / ``OLLAMA_HOST``).
+    Under the ``load → judge → evict`` / ``OLLAMA_NUM_PARALLEL=1`` topology a brief daemon
+    blip is *transient* — :func:`_call_with_retry` retries this error up to the pinned
+    bound before surfacing it (models-ollama-resilience-001/002).
+    """
+
+    def __init__(self, host: str, model_id: str, cause: BaseException | None = None) -> None:
+        self.host = host
+        self.model_id = model_id
+        self.__cause__ = cause
+        super().__init__(
+            f"[OLLAMA_UNREACHABLE] cannot reach the Ollama daemon at {host!r} "
+            f"for model {model_id!r}"
+            + (f": {cause}" if cause else "")
+            + " (hint: is the Ollama daemon running and reachable at this host? "
+            "start it with `ollama serve`, or correct OLLAMA_HOST)"
+        )
+
+
+class OllamaBadResponseError(RuntimeError):
+    """Ollama answered but the body is not a well-formed JSON object (§8.6).
+
+    Raised at the transport/parse boundary when an HTTP 200 carries a body that is not
+    decodable JSON (an intermediary returning HTML/an error page) or decodes to something
+    other than a mapping (a list, a bare string). The careful defensive work inside
+    :func:`_extract_text` / :func:`_logprob_of` tolerates *missing* fields gracefully; this
+    is the inverse — a response of the *wrong type* — which would otherwise surface as an
+    opaque ``JSONDecodeError`` at parse time or an ``AttributeError`` twenty lines later in
+    ``response.get(...)``. Surfacing it here, model-named and hinted, keeps a direct adapter
+    call as diagnosable as the ``characterize/run.py`` top-level path already is
+    (models-ollama-resilience-003).
+    """
+
+    def __init__(self, model_id: str, host: str, detail: str) -> None:
+        self.model_id = model_id
+        self.host = host
+        self.detail = detail
+        super().__init__(
+            f"[OLLAMA_BAD_RESPONSE] Ollama at {host!r} returned a malformed body for "
+            f"model {model_id!r}: {detail} "
+            "(hint: the daemon may be fronted by a proxy/load-balancer returning a "
+            "non-JSON body, or the endpoint is not an Ollama /api/chat surface)"
+        )
+
+
+def _norm_model(model_id: str | None) -> str:
+    """Normalize a model tag for served-vs-requested comparison (§11.6).
+
+    The Ollama daemon serves a *cloud* tag WITHOUT its suffix — it answers ``glm-5`` for
+    a requested ``glm-5:cloud`` and ``qwen3-coder:480b`` for ``qwen3-coder:480b-cloud``
+    — and may echo ``...:latest`` for an implicit-latest pull. So a served tag that
+    differs only by a trailing ``:latest`` or a trailing cloud suffix (``-cloud`` or
+    ``:cloud``) is the *same* model, not a fallback. A genuine fallback to a different
+    served model (e.g. a tier-timeout substitution) survives this normalization and is
+    caught. (Mirrors the normalization shape in ``swarm/verify_findings.py._norm``.)
+    """
+    m = (model_id or "").strip().replace(":latest", "")
+    for suffix in ("-cloud", ":cloud"):
+        if m.endswith(suffix):
+            m = m[: -len(suffix)]
+            break
+    return m
 
 #: Structural type for the Ollama chat client the adapter drives. Both the official
 #: ``ollama`` async client and the built-in httpx fallback satisfy this; tests pass a
@@ -89,6 +217,68 @@ _DEFAULT_SEED = 0
 #: Default Ollama host; read from the env at call time so deployment is not baked in.
 _DEFAULT_HOST = "http://localhost:11434"
 
+#: Default bounded retry policy for a single model call (§8.6, PIN_PER_STEP). Under the
+#: long sequential ``load → judge → evict`` characterization run a *single* transient
+#: blip (connection reset, a 503 while a model loads, a read hiccup) must not be upgraded
+#: into total loss of that model's run — a bounded retry converts the common transient
+#: case from "lose the whole model" to "lose ~1s". ``_DEFAULT_MAX_RETRIES`` is the number
+#: of *additional* attempts after the first (so 2 ⇒ up to 3 total tries); the backoff is
+#: ``base * 2**i`` seconds before retry ``i`` (e.g. 0.5s, 1s). NEVER applied to a 4xx, a
+#: :class:`ModelMismatchError`, an :class:`OllamaBadResponseError`, or a successful-but-
+#: empty completion — those are not transient (models-ollama-resilience-001).
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_RETRY_BACKOFF_BASE = 0.5
+
+
+#: Matches any Harmony chat-template control token — ``<|start|>``, ``<|end|>``,
+#: ``<|message|>``, ``<|channel|>``, ``<|return|>``, ``<|constrain|>`` … — i.e. ``<|`` …
+#: ``|>``. A *clean* (non-gpt-oss) response contains none of these, so the presence of a
+#: match is the trigger to normalize; its absence means pass the text through untouched.
+_HARMONY_TOKEN = re.compile(r"<\|[^|>]*\|>")
+
+#: Captures a Harmony channel's content: ``<|channel|>NAME<|message|>BODY`` up to the next
+#: control token (``<|end|>`` / ``<|return|>`` / the next ``<|start|>``) or end of string.
+#: The ``final`` channel carries the model's actual answer; ``analysis`` is hidden CoT
+#: (gpt-oss / OpenAI Harmony response format). ``re.DOTALL`` so a multi-line body matches.
+_HARMONY_CHANNEL = re.compile(
+    r"<\|channel\|>\s*(?P<name>\w+)\s*<\|message\|>(?P<body>.*?)(?=<\|[^|>]*\|>|\Z)",
+    re.DOTALL,
+)
+
+
+def _normalize_harmony(text: str) -> str:
+    """Strip leaked Harmony chat-template control tokens from a model completion.
+
+    A gpt-oss model served through a path that does NOT parse its **Harmony** chat
+    template (OpenAI Harmony response format) leaks control tokens straight into the
+    assistant text — ``<|start|>assistant<|channel|>analysis<|message|>…<|end|>`` (hidden
+    chain-of-thought) followed by ``<|channel|>final<|message|>…<|end|>`` (the real
+    answer), plus stray ``<|start|>``/``<|end|>``/``<|return|>``. A clean adapter response
+    (qwen3-coder and friends, or a correctly-parsing serving path) carries NONE of these,
+    so this transforms ONLY when a control token is actually present and otherwise returns
+    the input object UNCHANGED (``is`` identity — no copy, no surprise re-encoding).
+
+    When the channel structure is present, the **last ``final`` channel's** message is the
+    model's answer (the ``analysis`` channel is hidden reasoning, dropped); its body is
+    returned with surrounding whitespace trimmed. When control tokens are present but no
+    ``final`` channel is found (a partial/odd leak): if a ``<|message|>`` header marker is
+    present, the body after the LAST one is the content (the preamble — ``<|start|>assistant``
+    role header — is dropped); otherwise every ``<|…|>`` token is stripped and the residue
+    trimmed. A best-effort recovery that still hands the parser clean text. Surfaces nothing
+    on a clean response: identity in, identity out.
+    """
+    if not _HARMONY_TOKEN.search(text):
+        return text  # clean response — pass through byte-for-byte (no over-stripping)
+    finals = [m.group("body") for m in _HARMONY_CHANNEL.finditer(text)
+              if m.group("name") == "final"]
+    if finals:
+        return finals[-1].strip()
+    # No recognizable final channel. If a message header is present, the content is the
+    # body after the LAST <|message|> (drop the <|start|>role… header preamble); strip any
+    # residual control tokens from it. Else strip all tokens from the whole text.
+    body = text.rsplit("<|message|>", 1)[-1] if "<|message|>" in text else text
+    return _HARMONY_TOKEN.sub("", body).strip()
+
 
 def _extract_text(response: dict[str, Any]) -> str:
     """Pull the assistant text out of an Ollama ``/api/chat`` response.
@@ -97,13 +287,60 @@ def _extract_text(response: dict[str, Any]) -> str:
     Falls back to a top-level ``"response"`` (the ``/api/generate`` shape) so a fake
     client may return either, then to ``""`` — never raising on a missing field, since
     an empty completion is a legitimate (if unhelpful) model answer the caller scores.
+
+    The extracted text is normalized through :func:`_normalize_harmony` so a gpt-oss
+    Harmony chat-template leak (control tokens in ``content``, observed on a real run)
+    is collapsed to the model's actual final-channel message before any caller — the
+    ReAct :mod:`ai_crucible.solver_loop` parser, the judge, the characterization probe —
+    sees it. A clean (non-Harmony) completion is unaffected (identity pass-through).
     """
     message = response.get("message")
     if isinstance(message, dict) and "content" in message:
-        return str(message["content"])
+        return _normalize_harmony(str(message["content"]))
     if "response" in response:
-        return str(response["response"])
+        return _normalize_harmony(str(response["response"]))
     return ""
+
+
+def _extract_tool_calls(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull NATIVE function-calls out of an Ollama ``/api/chat`` response (Finding B').
+
+    A model trained to call tools natively (gpt-oss; OpenAI Harmony / Ollama tool-calling)
+    returns its actions as ``message.tool_calls`` and leaves ``content`` EMPTY, instead of
+    emitting the text ``ACTION`` line-protocol the solver loop's text parser reads — so a
+    purely-text Solver loop sees nothing and the model cannot Solve. This surfaces those
+    native calls so the loop can route them through the same governor + sandbox channel.
+
+    Each Ollama tool call is ``{"function": {"name": str, "arguments": dict | json-str}}``.
+    Returned NORMALIZED as ``{"name": str, "arguments": dict}`` (a string ``arguments`` is
+    JSON-decoded; an undecodable/absent one becomes ``{}``). A response with no
+    ``message.tool_calls`` (the text-protocol path) returns ``[]`` — never raises, so a
+    text Solver is unaffected.
+    """
+    message = response.get("message")
+    if not isinstance(message, dict):
+        return []
+    raw = message.get("tool_calls")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for tc in raw:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
+        if not name:
+            continue
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, TypeError):
+                args = {}
+        out.append({"name": str(name), "arguments": args if isinstance(args, dict) else {}})
+    return out
 
 
 def _first_token_logprob(response: dict[str, Any]) -> float | None:
@@ -180,6 +417,110 @@ def _logprob_to_probability(logprob: float | None) -> float | None:
     return prob
 
 
+def _normalize_sdk_response(resp: Any, model_id: str, host: str) -> dict[str, Any]:
+    """Normalize an ``ollama`` SDK response to a plain mapping, failing legibly (§8.6).
+
+    The SDK is resolved lazily and its version is never pinned, so its response shape is
+    a real (if low-probability) drift surface. Tries, in order: an already-``dict``;
+    pydantic v2 ``model_dump()``; legacy pydantic ``.dict()``; then a guarded ``dict(resp)``.
+    If none yields a mapping, raises :class:`OllamaBadResponseError` naming the installed
+    ``ollama`` version and the unexpected type — instead of an opaque ``TypeError`` deep in
+    ``_extract_text`` (models-ollama-resilience-004).
+    """
+    if isinstance(resp, dict):
+        return resp
+    for attr in ("model_dump", "dict"):
+        method = getattr(resp, attr, None)
+        if callable(method):
+            try:
+                out = method()
+            except Exception:  # noqa: BLE001 - fall through to the next strategy
+                continue
+            if isinstance(out, dict):
+                return out
+    try:
+        out = dict(resp)
+    except (TypeError, ValueError) as exc:
+        try:
+            from importlib.metadata import version
+
+            sdk_version = version("ollama")
+        except Exception:  # noqa: BLE001 - version lookup is best-effort
+            sdk_version = "unknown"
+        raise OllamaBadResponseError(
+            model_id,
+            host,
+            f"ollama SDK (version {sdk_version}) returned a {type(resp).__name__} "
+            "that is not dict-convertible; the SDK response shape may have changed",
+        ) from exc
+    return out
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Is ``exc`` a *transient* model-call failure worth retrying (§8.6)?
+
+    Retryable: a connect/read/transport blip — :class:`OllamaUnreachableError` (the
+    structured connect failure the httpx fallback raises), the underlying httpx
+    connect/read/protocol errors, and a 5xx ``HTTPStatusError`` (e.g. a 503 while a model
+    loads). NOT retryable: a 4xx (a client/request error — retrying won't help), a
+    :class:`ModelMismatchError` (a provenance breach the andon must see, not a glitch), or
+    an :class:`OllamaBadResponseError` (a malformed body is a shape problem, not a blip).
+    A successful-but-empty completion is not an exception and never reaches here.
+
+    httpx is imported lazily inside the check so this module still imports without it.
+    """
+    if isinstance(exc, (ModelMismatchError, OllamaBadResponseError)):
+        return False
+    if isinstance(exc, OllamaUnreachableError):
+        return True
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx is a declared dependency
+        return False
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadError,
+                        httpx.ReadTimeout, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 500 <= exc.response.status_code < 600
+    return False
+
+
+async def _call_with_retry(
+    call: Callable[[], Awaitable[Any]],
+    *,
+    max_retries: int,
+    backoff_base: float,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    is_transient: Callable[[BaseException], bool] = _is_transient,
+) -> Any:
+    """Run ``call`` with a BOUNDED retry on transient failures (§8.6, PIN_PER_STEP).
+
+    Tries ``call`` up to ``max_retries + 1`` times; between tries it sleeps
+    ``backoff_base * 2**i`` seconds (exponential backoff). Only ``is_transient`` failures
+    are retried — a non-transient error (4xx, :class:`ModelMismatchError`,
+    :class:`OllamaBadResponseError`) is re-raised immediately so it reaches the kernel's
+    andon without delay. On exhaustion the *last* transient error is re-raised unchanged
+    (so a daemon-down run still surfaces the hint-bearing :class:`OllamaUnreachableError`).
+
+    ``sleep`` is injectable (default :func:`asyncio.sleep`) so tests drive the retry path
+    with a zero-cost stub and never sleep for real. ``is_transient`` is injectable so the
+    Claude adapter can supply its own provider-specific classifier (Anthropic SDK error
+    types). The policy is a per-instance pin (recorded in :meth:`OllamaModel.pin_metadata`)
+    so the run stays replayable.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await call()
+        except BaseException as exc:  # noqa: BLE001 - re-raised below; classified first
+            if not is_transient(exc) or attempt >= max_retries:
+                raise
+            delay = backoff_base * (2**attempt)
+            attempt += 1
+            if delay > 0:
+                await sleep(delay)
+
+
 class OllamaModel:
     """A local model served by Ollama, usable as kernel ``generate`` / panel judge /
     characterization probe.
@@ -201,6 +542,13 @@ class OllamaModel:
         seed: fixed RNG seed pinned for replayability (§11.2 / PIN_PER_STEP).
         host: Ollama base URL; defaults to ``$OLLAMA_HOST`` then ``localhost:11434``,
             read at call time (never captured at import).
+        max_retries: bounded number of *additional* attempts after the first on a
+            transient model-call failure (§8.6); ``0`` disables retry. Pinned per step
+            and recorded in :meth:`pin_metadata` (models-ollama-resilience-001).
+        retry_backoff_base: seconds for the first backoff; attempt ``i`` waits
+            ``base * 2**i`` before the next try. Pinned in :meth:`pin_metadata`.
+        sleep: injected async sleep used for backoff (default :func:`asyncio.sleep`);
+            tests pass a zero-cost stub so the suite never sleeps for real.
     """
 
     def __init__(
@@ -213,6 +561,9 @@ class OllamaModel:
         num_ctx: int = _DEFAULT_NUM_CTX,
         seed: int = _DEFAULT_SEED,
         host: str | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        retry_backoff_base: float = _DEFAULT_RETRY_BACKOFF_BASE,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.model_id = model_id
         self.family = family
@@ -221,6 +572,9 @@ class OllamaModel:
         self.num_ctx = num_ctx
         self.seed = seed
         self._host = host
+        self.max_retries = max_retries
+        self.retry_backoff_base = retry_backoff_base
+        self._sleep = sleep
 
     # -- deterministic request options (§11.2) ------------------------------- #
 
@@ -273,6 +627,10 @@ class OllamaModel:
             "options": self._options(),
             "logprobs": self._logprob_request(),
             "serving": "OLLAMA_NUM_PARALLEL=1; load->judge->evict (§11.2)",
+            "retry": {
+                "max_retries": self.max_retries,
+                "backoff_base": self.retry_backoff_base,
+            },
         }
 
     # -- client resolution (lazy, env-read) ---------------------------------- #
@@ -293,12 +651,18 @@ class OllamaModel:
             import ollama  # type: ignore[import-untyped]
 
             async_client = ollama.AsyncClient(host=host)
+            model_id = self.model_id
 
             async def _via_sdk(**kwargs: Any) -> dict[str, Any]:
                 resp = await async_client.chat(**kwargs)
                 # The SDK may return a pydantic-ish object; normalize to a mapping the
-                # rest of the adapter (and tests) treat uniformly.
-                return dict(resp) if not isinstance(resp, dict) else resp
+                # rest of the adapter (and tests) treat uniformly. Do NOT assume it is
+                # blindly ``dict()``-convertible — a future SDK shape change would raise
+                # an opaque TypeError. Try, in order: an already-mapping; pydantic v2
+                # ``model_dump()``; legacy ``.dict()``; then a guarded ``dict(resp)``,
+                # re-raising a structured error (naming the installed ollama version and
+                # the unexpected type) on failure (models-ollama-resilience-004).
+                return _normalize_sdk_response(resp, model_id, host)
 
             self._client = _via_sdk
             return self._client
@@ -307,19 +671,43 @@ class OllamaModel:
 
         import httpx
 
+        model_id = self.model_id
+
         async def _via_httpx(**kwargs: Any) -> dict[str, Any]:
             payload = {**kwargs, "stream": False}
-            async with httpx.AsyncClient(base_url=host, timeout=600.0) as http:
-                r = await http.post("/api/chat", json=payload)
-                r.raise_for_status()
-                return r.json()
+            try:
+                async with httpx.AsyncClient(base_url=host, timeout=600.0) as http:
+                    r = await http.post("/api/chat", json=payload)
+                    r.raise_for_status()
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                # Daemon down / wrong host — surface a structured, hint-bearing error
+                # instead of a bare ConnectError (models-ollama-resilience-002). It is
+                # transient (:func:`_is_transient`) so the bounded retry covers a blip.
+                raise OllamaUnreachableError(host, model_id, cause=exc) from exc
+            # HTTP 200 but the body may not be JSON / not an object (an intermediary
+            # returning HTML, a proxy error page). Guard the parse and the shape at the
+            # boundary with a model-named error (models-ollama-resilience-003).
+            try:
+                body = r.json()
+            except (ValueError, httpx.DecodingError) as exc:
+                snippet = r.text[:200]
+                raise OllamaBadResponseError(
+                    model_id, host, f"response body is not valid JSON: {snippet!r}"
+                ) from exc
+            if not isinstance(body, dict):
+                raise OllamaBadResponseError(
+                    model_id, host, f"response body is {type(body).__name__}, not an object"
+                )
+            return body
 
         self._client = _via_httpx
         return self._client
 
     # -- core completion ----------------------------------------------------- #
 
-    async def _complete_raw(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _complete_raw(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Call Ollama chat with the pinned options and return the **raw response**.
 
         Sends ``{model, messages, options}`` (options = :meth:`_options`, §11.2) to the
@@ -327,14 +715,73 @@ class OllamaModel:
         needs more than the text — :meth:`judge_item`, which reads the verdict-token
         logprob for confidence (§12) — can inspect it. :meth:`complete` is the text-only
         view over this one request path (no second model call).
+
+        Provenance guard (§11.6 / models-cli-002): Ollama echoes the *served* model in a
+        top-level ``model`` field. This is the one choke point every call flows through
+        (:meth:`complete`/:meth:`generate`/:meth:`judge` and :meth:`judge_item`), so the
+        served-vs-requested check lives here: if the response names a model other than the
+        one requested (modulo a cloud/``:latest`` suffix, :func:`_norm_model`) we raise
+        :class:`ModelMismatchError` rather than let a JudgmentRecord be stamped with the
+        requested ``model_id``/``family`` while a different model actually answered.
+
+        Resilience (§8.6): the single client call is wrapped in a BOUNDED retry
+        (:func:`_call_with_retry`) so a transient connect/read blip or a 503-while-loading
+        costs ~1s, not the model's whole run (models-ollama-resilience-001). The retry
+        never fires on a 4xx, a :class:`ModelMismatchError`, or an
+        :class:`OllamaBadResponseError` — those are not transient. The response shape is
+        also guarded here: a non-mapping reply (e.g. an injected client returning a list /
+        bare string) raises a model-named :class:`OllamaBadResponseError` rather than an
+        opaque ``AttributeError`` in :func:`_extract_text` (models-ollama-resilience-003).
         """
         client = self._resolve_client()
-        return await client(
-            model=self.model_id,
-            messages=messages,
-            options=self._options(),
-            **self._logprob_request(),
+        # Offer native function-calling tools when the caller supplies them (Finding B'):
+        # a native-protocol model (gpt-oss) then returns its actions as message.tool_calls
+        # instead of the text ACTION protocol. Omitted (no key) for the text-only path so a
+        # text Solver / a minimal fake client is unaffected.
+        extra = {"tools": tools} if tools else {}
+
+        async def _call() -> dict[str, Any]:
+            return await client(
+                model=self.model_id,
+                messages=messages,
+                options=self._options(),
+                **self._logprob_request(),
+                **extra,
+            )
+
+        response = await _call_with_retry(
+            _call,
+            max_retries=self.max_retries,
+            backoff_base=self.retry_backoff_base,
+            sleep=self._sleep,
         )
+        if not isinstance(response, dict):
+            host = self._host or os.environ.get("OLLAMA_HOST", _DEFAULT_HOST)
+            raise OllamaBadResponseError(
+                self.model_id,
+                host,
+                f"client returned {type(response).__name__}, not a mapping",
+            )
+        self._assert_served_matches(response)
+        return response
+
+    def _assert_served_matches(self, response: dict[str, Any]) -> None:
+        """Raise :class:`ModelMismatchError` if the served model != the requested one.
+
+        Reads the top-level ``model`` field Ollama echoes on every ``/api/chat`` response
+        and compares it (modulo a trailing cloud/``:latest`` suffix, :func:`_norm_model`)
+        to :attr:`model_id`. A *missing* ``model`` field is tolerated — older servers /
+        minimal fakes may omit it, and an empty completion is already handled elsewhere —
+        so the guard fails CLOSED only on a *positive* mismatch, never on absence of the
+        provenance field. This keeps every existing call (real server + faked tests that
+        do not echo a model) working while catching the silent-fallback case the finding
+        describes (models-cli-002).
+        """
+        served = response.get("model")
+        if isinstance(served, str) and served and _norm_model(served) != _norm_model(
+            self.model_id
+        ):
+            raise ModelMismatchError(self.model_id, served)
 
     async def complete(self, messages: list[dict[str, Any]]) -> str:
         """Call Ollama chat with the pinned deterministic options and return the text.
@@ -346,6 +793,28 @@ class OllamaModel:
         guarantees a single request carries the replayable knobs.
         """
         return _extract_text(await self._complete_raw(messages))
+
+    async def complete_turn(
+        self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """One turn returning BOTH the assistant text AND any native tool-calls (Finding B').
+
+        The multi-model Solver primitive: a text-protocol model (Claude, or a model that
+        emits the ``ACTION`` line protocol) returns its move in the text; a native
+        function-calling model (gpt-oss) returns its move as ``tool_calls`` with empty
+        ``content``. The solver loop drives THIS when the model exposes it (duck-typed), so
+        a non-text-protocol model can Solve through the same governor + sandbox channel —
+        ``OllamaModel.complete`` (text-only) is the fallback the loop uses otherwise.
+
+        ``tools`` is the function-calling schema offered to the model (the loop passes the
+        sandbox read_file/exec/write_file schemas). Returns ``(text, tool_calls)`` where
+        ``tool_calls`` is the normalized ``[{"name", "arguments"}, ...]`` (possibly empty —
+        then the text carries the move/answer). Same single request path as
+        :meth:`complete` (the provenance + retry guards apply), so a mis-served model still
+        raises :class:`ModelMismatchError`.
+        """
+        response = await self._complete_raw(messages, tools=tools)
+        return (_extract_text(response), _extract_tool_calls(response))
 
     # -- kernel generate plug (§10.2) --------------------------------------- #
 

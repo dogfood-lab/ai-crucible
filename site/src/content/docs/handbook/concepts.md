@@ -31,18 +31,42 @@ contract.
 
 ## The catalog lifecycle: Lab → Arena → Regression
 
-Puzzles live in a three-tier catalog and move in one direction:
+Puzzles live in a three-tier catalog. Runs **accumulate across sessions** in an event-sourced,
+hash-chained log (the source of truth); the tier of each puzzle is a *derived projection* folded
+from that log — a tier is never mutated in place, only changed by appending a transition event.
 
 - **Lab** — live and in-iteration. A Designer and Solver are actively working a candidate; its
   difficulty is still being characterized.
-- **Arena** — graduated and active. A Lab puzzle is promoted once it clears the graduation rule
-  *and* is validated as fair/difficult by input from outside the Solver's own model family.
+- **Arena** — graduated and active. Promotion is **three-valued and abstention-aware**: a Lab puzzle
+  is promoted only when it clears the discriminating Wilson band on the Solver's own rate **and** the
+  cross-family cohort finds it non-trivial **and** a cross-family panel confidently rules it fair.
+  Anything less than a confident verdict **DEFERS to the Designer** (escalation), and a confident
+  negative HOLDs — the instrument never fakes a promotion it cannot justify.
 - **Regression** — historical. When the frontier moves and a puzzle becomes reliably solvable, it is
-  **demoted to Regression, never deleted**, and must keep passing forever.
+  **demoted to Regression, never deleted**, and must keep passing forever. Demotion uses an
+  anytime-valid *e-process* with a hysteresis dwell + a frontier gate, so a single lucky run cannot
+  flap a puzzle out of Arena (and a weak model passing never demotes — *everyone-fails stays in
+  Arena*, the maximally diagnostic frontier gap).
 
 Demoting rather than deleting is deliberate: the catalog becomes a *capability-evolution timeline*.
 When a stronger model ships, you demote what it consistently solves and run a fresh "find what it
 still fails on" Lab cycle, so the catalog stays ahead of the frontier by construction.
+
+## The differential typology: what *kind* of gap is it?
+
+With both the Solver's solve-rate **and** the cross-family cohort's solve-rate on a puzzle, the
+*difference* classifies the gap — the instrument's highest-value output:
+
+- **Claude-specific gap** — Claude fails where the cohort passes (a direct capability deficit; the
+  most actionable finding).
+- **LLM-general gap** — everyone fails (a frontier gap; diagnostic, different story).
+- **Claude-strength** — Claude passes where the cohort fails (an anti-regression item to protect).
+- **Inconclusive / underpowered** — a first-class outcome, not a bug: at small `k` the minimum
+  detectable effect is large, so most puzzles legitimately land here until more evidence accumulates.
+
+The call is driven off a **Newcombe difference confidence interval** (not the statistically-wrong
+overlap of two separate intervals), with a Benjamini-Hochberg correction across the catalog — a
+small-N null is never dressed up as a finding.
 
 ## Reliability: `pass^k`, not `pass@k`
 

@@ -19,10 +19,17 @@ A :class:`RubricBundle` holds the four tunable surfaces — penalty/component
 ``version`` string. :func:`compile_bundle` canonicalises it to RFC-8785-style
 JSON and returns ``(sha256_hex, canonical_bytes)``; the hash is the anchor every
 downstream attestation (in-toto predicate, RFC 3161 timestamp, Rekor inclusion
-proof) binds to (§9.5). :func:`bump_on_change` enforces the §9.1 invariant: the
-version changes iff the content hash changes, so two byte-identical bundles can
-never carry two different versions and a changed bundle can never silently keep
-the old version.
+proof) binds to (§9.5). The §9.1 invariant — *the version changes iff the
+content hash changes*, so two byte-identical bundles can never carry two
+different versions and a changed bundle can never silently keep the old version
+— is split across two functions by intent: :func:`bump_on_change` *advises* the
+label a changed bundle should adopt (a pure suggester, see its docstring), and
+:func:`assert_versioned` *enforces* the invariant as a fail-closed andon — it
+raises when content moved but the label did not, or when the label moved but the
+content did not. The authoritative anti-retconning seal at rest is the recorded
+``bundle_hash`` itself (the third element of every leaderboard record); the two
+functions are the human-facing guardrails that keep the label honest *before*
+that hash is recorded.
 
 NOTE on the version field and the hash: the ``version`` string is deliberately
 **excluded from the hashed material**. The hash is a fingerprint of the *scoring
@@ -46,10 +53,13 @@ Standards compliance (the six — workflow-standards.md):
 - DECOMPOSE_BY_SECRETS — 3: the four tunable surfaces are grouped into one
   hashable object that changes together; the *version label* (which changes on a
   different cadence — human decision) is held as a separate, un-hashed field.
-- UNCERTAINTY_GATED_HUMANS — 2: :func:`bump_on_change` is the gate that forces a
-  human-visible version increment exactly when (and only when) the scoring
-  content changed; it frames the decision contrastively (returns old vs new
-  version with the hash as evidence).
+- UNCERTAINTY_GATED_HUMANS — 2: :func:`assert_versioned` is the gate that forces
+  a human-visible version increment exactly when (and only when) the scoring
+  content changed — it RAISES a structured ``RubricBundleError`` on an unbumped
+  change (or a relabel of unchanged content), so the human cannot silently
+  retcon a tuned instrument. :func:`bump_on_change` is the contrastive companion:
+  it advises the label the change should adopt (old vs suggested-new, with the
+  two hashes as evidence). The gate enforces; the suggester explains.
 - EXTERNAL_VERIFIER — 3: the content hash is verifiable by *any* third party with
   the canonical bytes and a SHA-256 implementation — the verification needs no
   trust in ai_crucible and no access to ai_crucible's reasoning. This is the §9.6
@@ -69,6 +79,7 @@ __all__ = [
     "canonical_bundle_json",
     "compile_bundle",
     "bump_on_change",
+    "assert_versioned",
 ]
 
 
@@ -169,20 +180,28 @@ def compile_bundle(bundle: RubricBundle) -> tuple[str, bytes]:
 
 
 def bump_on_change(old: RubricBundle, new: RubricBundle) -> str:
-    """Return the version ``new`` should carry, enforcing the §9.1 invariant.
+    """*Advise* the version ``new`` should carry under the §9.1 invariant.
 
-    "No silent retconning": the version changes **iff** the content hash changes.
+    This is a pure **suggester**, not the seal — it computes a recommended label
+    and returns it; it does NOT mutate either argument and does NOT force the
+    caller to adopt the suggestion. The fail-closed enforcement of "no silent
+    retconning" lives in :func:`assert_versioned`; the authoritative seal at rest
+    is the recorded ``bundle_hash`` (module docstring). Use this to *propose* a
+    label, then run :func:`assert_versioned` to *prove* the label is honest.
 
     - If ``new``'s scoring content hash equals ``old``'s, the bundles are the
-      same instrument; this returns ``old.version`` (the version does not advance
-      for a no-op edit, and ``new`` should keep the old label).
+      same instrument; the version need not advance. This returns
+      ``new.version`` unchanged — including a deliberate relabel — so the
+      caller's explicit choice is preserved (it does not silently revert to
+      ``old.version``). (Whether a relabel of identical content is *allowed* is
+      a separate policy question :func:`assert_versioned` answers.)
     - If the hashes differ, the content changed and the version must advance;
       this returns a new version string derived from ``old.version`` (e.g.
       ``"v1.0"`` -> ``"v1.1"``; an unparseable label gets a ``"+1"`` suffix).
 
-    The caller assigns the returned string to ``new.version``. This function does
-    not mutate either argument (pure), so the decision is auditable: the returned
-    string plus the two hashes are the full justification.
+    The caller assigns the returned string to ``new.version``. Because the
+    function is pure, the decision is auditable: the returned string plus the two
+    hashes are the full justification.
 
     Raises:
         RubricBundleError: if either bundle's content cannot be compiled.
@@ -190,9 +209,65 @@ def bump_on_change(old: RubricBundle, new: RubricBundle) -> str:
     old_hash, _ = compile_bundle(old)
     new_hash, _ = compile_bundle(new)
     if old_hash == new_hash:
-        # Same instrument — version stays put (and new should adopt old's label).
-        return old.version
+        # Same instrument — no advance needed. Preserve the caller's chosen label
+        # (do NOT silently revert an explicit relabel to old.version); a relabel
+        # of identical content is a policy decision assert_versioned adjudicates.
+        return new.version
     return _next_version(old.version)
+
+
+def assert_versioned(old: RubricBundle, new: RubricBundle) -> str:
+    """Enforce the §9.1 invariant as a fail-closed andon and return ``new``'s hash.
+
+    "No silent retconning": the version label changes **iff** the content hash
+    changes. This is the ENFORCING half of the invariant — where
+    :func:`bump_on_change` merely advises, this gate RAISES when the label and
+    the content disagree, so a changed instrument cannot be published or recorded
+    under a stale label and an unchanged instrument cannot be relabeled to look
+    like a new one. Call it on the path that records ``(model_id, score,
+    bundle_hash)`` (release / leaderboard / Rekor), before the hash is committed.
+
+    The two failure modes the gate refuses:
+
+    - **content moved, label did not** (``STATE_RUBRIC_VERSION_NOT_BUMPED``): the
+      tuned weights/thresholds/judge_prompts changed but ``new.version ==
+      old.version`` — the classic silent retcon. The hint names the label
+      :func:`bump_on_change` would have suggested.
+    - **label moved, content did not** (``STATE_RUBRIC_VERSION_DRIFT``): two
+      byte-identical bundles carry two different versions — a phantom "new
+      instrument" that scores identically.
+
+    On success returns ``compile_bundle(new)[0]`` — the hash the caller should
+    record — so the gate doubles as the hash source on the happy path. Pure: it
+    does not mutate either argument.
+
+    Raises:
+        RubricBundleError: on either disagreement above, or if either bundle's
+            content cannot be compiled.
+    """
+    old_hash, _ = compile_bundle(old)
+    new_hash, _ = compile_bundle(new)
+    content_changed = old_hash != new_hash
+    version_changed = new.version != old.version
+
+    if content_changed and not version_changed:
+        raise _fail(
+            "STATE_RUBRIC_VERSION_NOT_BUMPED",
+            f"scoring content changed (hash {old_hash[:12]} -> {new_hash[:12]}) "
+            f"but version stayed {new.version!r} — §9.1 forbids silent retconning",
+            f"bump the version (e.g. {bump_on_change(old, new)!r}) before "
+            f"recording (model_id, score, bundle_hash)",
+        )
+    if version_changed and not content_changed:
+        raise _fail(
+            "STATE_RUBRIC_VERSION_DRIFT",
+            f"version changed ({old.version!r} -> {new.version!r}) but scoring "
+            f"content is byte-identical (hash {new_hash[:12]}) — two labels for "
+            "one instrument",
+            f"keep the label {old.version!r} for unchanged content, or actually "
+            "change a weight/threshold/judge_prompt if a new instrument is meant",
+        )
+    return new_hash
 
 
 def _next_version(version: str) -> str:
@@ -200,9 +275,14 @@ def _next_version(version: str) -> str:
 
     Recognises a trailing dotted numeric component and increments the last
     segment (``"v1.0"`` -> ``"v1.1"``, ``"1.2.3"`` -> ``"1.2.4"``,
-    ``"v3"`` -> ``"v4"``). Anything it can't parse gets a ``"+1"`` suffix so the
-    label still provably changes (the invariant is "version changes when hash
-    changes"; the exact scheme is a convention, the change is the contract).
+    ``"v3"`` -> ``"v4"``). Zero-padding is **preserved** so date-style /
+    calendar-pinned labels stay sane: ``"2026.06"`` -> ``"2026.07"`` (not
+    ``"2026.7"``), ``"v01"`` -> ``"v02"``; a carry that outgrows the pad width
+    widens naturally (``"2026.09"`` -> ``"2026.10"``, ``"v1.09"`` -> ``"v1.10"``).
+    Anything it can't parse cleanly — including a label with a trailing dangling
+    dot like ``"v1."`` — gets a ``"+1"`` suffix so the label still provably
+    changes (the invariant is "version changes when hash changes"; the exact
+    scheme is a convention, the change is the contract).
     """
     stripped = version.strip()
     if not stripped:
@@ -214,13 +294,18 @@ def _next_version(version: str) -> str:
         i -= 1
     prefix, tail = stripped[:i], stripped[i:]
 
-    if not tail or tail in {".", ""}:
+    # A tail that is empty, bare dots, or ends in a dangling '.' is not a clean
+    # numeric label (e.g. "v1." -> tail "1.") — fall back to the +1 suffix rather
+    # than emit a misleading partial bump like "v2.".
+    if not tail or tail.strip(".") == "" or tail.endswith("."):
         return f"{stripped}+1"
 
     segments = tail.split(".")
-    # Bump the last non-empty numeric segment.
+    # Bump the last non-empty numeric segment, preserving its zero-pad width so a
+    # calendar label ("2026.06") increments to "2026.07", not "2026.7".
     for idx in range(len(segments) - 1, -1, -1):
         if segments[idx].isdigit():
-            segments[idx] = str(int(segments[idx]) + 1)
+            width = len(segments[idx])
+            segments[idx] = str(int(segments[idx]) + 1).zfill(width)
             return prefix + ".".join(segments)
     return f"{stripped}+1"

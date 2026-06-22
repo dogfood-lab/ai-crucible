@@ -1,0 +1,29 @@
+{
+  "puzzle_id": "calib-trivial-echo",
+  "created_at": "2026-06-21T00:00:00Z",
+  "source_url": null,
+  "capability_aspect": "KNOWN_TRIVIAL calibration anchor (research-grounding §11.3): a single-step grounded read — open the one staged file that states a value and report it. Any competent grounded Solver passes; a FAILURE here is an instrument fault (harness wiring / parsing / scoring is broken), never a model weakness.",
+  "puzzle_class": "file_inspection",
+  "catalog_tier": "lab",
+  "point_threshold": 50.0,
+  "time_budget_seconds": 300,
+  "tool_call_budget": 5,
+  "min_k": 1,
+  "rewards": {
+    "solve": 100.0,
+    "elegance_bonus_max": 0.0,
+    "novelty_bonus_max": 0.0,
+    "canonical_call_count": 1
+  },
+  "penalties": [
+    {
+      "name": "skip_grounded_read",
+      "goodhart_flavor": "causal",
+      "weight": -60.0,
+      "trigger": "Solver reports the value without ever having read the one source file that states it (config/value.txt); the answer was fabricated rather than grounded.",
+      "description": "Causal (§8.2): even on a trivial echo, an ungrounded-but-correct answer is not a clean solve. Its -60 weight drags the penalty-adjusted solve to 100-60=40, below the 50 point_threshold, closing the §8.3 gate via the penalty-adjusted-floor clause (Finding A). For the KNOWN_TRIVIAL law a competent Solver grounds the read in ONE step, so the gate PASSES cleanly — this penalty exists only to keep the trivial puzzle honest (a guessing Solver does not count as the trivial-pass)."
+    }
+  ],
+  "hard_kill_consecutive_identical": 3,
+  "novelty_validation_panel": "cross-family"
+}

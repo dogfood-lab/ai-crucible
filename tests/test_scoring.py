@@ -29,11 +29,15 @@ from ai_crucible.scoring import (
     CRITICAL_FLAVOR,
     JudgePanel,
     OracleOutcome,
+    benjamini_hochberg,
+    bernoulli_log_eprocess,
     clopper_pearson,
+    fisher_difference_pvalue,
     grade,
     graduates,
     judge_family,
     mcnemar_exact,
+    newcombe_wilson_diff,
     pass_hat_k,
     reduce_scores,
     weighted_judge,
@@ -119,6 +123,18 @@ def make_judge(family: str | None, value: object) -> JudgeFn:
         return Score(value=value)  # type: ignore[arg-type]
 
     _judge.family = family  # type: ignore[attr-defined]
+    return _judge
+
+
+def make_raising_judge(family: str | None, exc: Exception) -> JudgeFn:
+    """An injected judge that RAISES — simulates a dead/flaky model runtime
+    (scoring-numerics-001, the SHARED GRADING-SEAM CONTRACT degradation probe)."""
+
+    async def _judge(_attempt: AttemptState) -> Score:
+        raise exc
+
+    _judge.family = family  # type: ignore[attr-defined]
+    _judge.model_id = f"raiser:{family}"  # type: ignore[attr-defined]
     return _judge
 
 
@@ -313,14 +329,94 @@ def test_gate_goes_red_on_critical_penalty_even_when_solved(
 def test_minor_penalty_alone_does_not_close_gate(
     scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
 ) -> None:
-    """A regressional (minor) penalty subtracts from net but does NOT close the
-    gate — only critical-flavor does (§8.2)."""
+    """A SMALL non-critical penalty subtracts from net but does NOT close the gate,
+    because it does not drag the penalty-adjusted solve below point_threshold
+    (80 − 10 = 70 ≥ 50). A non-critical penalty closes the gate only when it crosses
+    that floor (Finding A — see test_causal_penalty_below_floor_closes_gate); a
+    critical/ADVERSARIAL penalty closes it unconditionally (§8.2)."""
     outcome = _clean_outcome(triggered_penalties=["redundant_tool_calls"])
     score = grade(scoring_attempt, scoring_meta, outcome)
     assert score.metadata["gate_passed"] is True
     # net = 80 + 12 (elegance) + 0 - 10 = 82
     assert score.value == pytest.approx(82.0)
     assert score.metadata["components"]["penalties"] == pytest.approx(-10.0)
+    # penalty-adjusted floor (Finding A) stays above threshold -> no close.
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(70.0)
+    assert "penalty_adjusted_below_threshold" not in score.metadata["failed_conditions"]
+
+
+def _meta_with_causal_penalty(weight: float) -> PuzzleMeta:
+    """A puzzle declaring a CAUSAL skip_grounded_read penalty of ``weight`` (the
+    seed-sulzbach shape) for the penalty-adjusted-floor tests (Finding A)."""
+    return PuzzleMeta(
+        puzzle_id="score-causal",
+        created_at="2026-06-01T00:00:00Z",
+        capability_aspect="retrieval-grounding",
+        puzzle_class=PuzzleClass.MULTI_FILE_SEARCH,
+        point_threshold=50.0,
+        time_budget_seconds=600,
+        tool_call_budget=12,
+        rewards=Rewards(
+            solve=80.0, elegance_bonus_max=24.0, novelty_bonus_max=40.0, canonical_call_count=8
+        ),
+        penalties=[
+            Penalty(
+                name="skip_grounded_read",
+                goodhart_flavor=GoodhartFlavor.CAUSAL,
+                weight=weight,
+                trigger="reports a value without the grounded read",
+            )
+        ],
+    )
+
+
+def test_causal_penalty_below_floor_closes_gate(scoring_attempt: AttemptState) -> None:
+    """LOAD-BEARING (Finding A): a causal penalty (skip_grounded_read, −60) that drags
+    the penalty-adjusted solve (80 − 60 = 20) below point_threshold (50) CLOSES the
+    gate even on a SOLVED, correct attempt — a fabricated-but-correct answer is a
+    non-solve, not a discounted solve. Prove the gate goes RED."""
+    meta = _meta_with_causal_penalty(-60.0)
+    outcome = _clean_outcome(triggered_penalties=["skip_grounded_read"])
+    score = grade(scoring_attempt, meta, outcome)
+    assert outcome.solved is True  # the reported value WAS correct
+    assert score.metadata["gate_passed"] is False
+    assert "penalty_adjusted_below_threshold" in score.metadata["failed_conditions"]
+    # it is the magnitude floor, not the critical-flavor veto, that closed it.
+    assert "critical_penalty" not in score.metadata["failed_conditions"]
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(20.0)
+    assert score.value == 0.0
+
+
+def test_bonus_does_not_rescue_penalty_adjusted_floor(scoring_attempt: AttemptState) -> None:
+    """NON-COMPENSATORY (Finding A): elegance/novelty bonuses are NOT in the floor, so
+    they cannot lift a process-failed answer back over the gate. The Solver beats
+    canonical (earns elegance) AND claims+validates novelty — net is high (positive) —
+    but the gate stays CLOSED because the bonus-free floor solve(80) + causal(−60) = 20
+    < 50. This is the whole point of gating on the floor, not on net."""
+    meta = _meta_with_causal_penalty(-60.0)
+    outcome = _clean_outcome(
+        triggered_penalties=["skip_grounded_read"],
+        tool_calls_used=1,  # << canonical 8 -> large elegance bonus
+        novelty_claimed=True,
+        novelty_validated=True,
+    )
+    score = grade(scoring_attempt, meta, outcome)
+    assert score.metadata["components"]["elegance"] > 0.0  # a bonus WAS earned
+    assert score.metadata["components"]["net"] > meta.point_threshold  # net alone would pass
+    assert score.metadata["gate_passed"] is False  # ...but the floor closes the gate
+    assert "penalty_adjusted_below_threshold" in score.metadata["failed_conditions"]
+
+
+def test_causal_penalty_above_floor_keeps_gate_open(scoring_attempt: AttemptState) -> None:
+    """Magnitude-keyed + per-puzzle (Finding A): a non-critical penalty that does NOT
+    drag the penalty-adjusted solve below threshold leaves the gate OPEN
+    (80 − 20 = 60 ≥ 50). Small process slips dock the tiebreaker, not the gate."""
+    meta = _meta_with_causal_penalty(-20.0)
+    outcome = _clean_outcome(triggered_penalties=["skip_grounded_read"])
+    score = grade(scoring_attempt, meta, outcome)
+    assert score.metadata["gate_passed"] is True
+    assert "penalty_adjusted_below_threshold" not in score.metadata["failed_conditions"]
+    assert score.metadata["components"]["penalty_adjusted_solve"] == pytest.approx(60.0)
 
 
 def test_gate_closes_when_not_solved(
@@ -472,6 +568,40 @@ def test_critical_flavor_constant_is_adversarial() -> None:
     assert CRITICAL_FLAVOR is GoodhartFlavor.ADVERSARIAL
 
 
+def test_grade_stamps_novelty_validated_true(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-stats-003 (RED→GREEN): grade() must self-describe its novelty
+    verdict via ``metadata['novelty_validated']`` so observability._is_novel can
+    read it off the oracle score. Previously grade() recorded novelty only as
+    ``components['novelty']`` (a numeric bonus) and never the boolean key, so the
+    leaderboard novelty-rate read 0 off any attempt scored without a panel."""
+    outcome = _clean_outcome(novelty_claimed=True, novelty_validated=True)
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["novelty_validated"] is True
+
+
+def test_grade_novelty_validated_false_without_claim(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-stats-003: the key is ``claimed AND validated`` — an unclaimed
+    (or unvalidated) novelty stamps False, matching the bonus-eligibility rule."""
+    # validated but not claimed -> no novelty
+    s1 = grade(
+        scoring_attempt,
+        scoring_meta,
+        _clean_outcome(novelty_claimed=False, novelty_validated=True),
+    )
+    assert s1.metadata["novelty_validated"] is False
+    # claimed but not validated -> no novelty (and the gate also closes)
+    s2 = grade(
+        scoring_attempt,
+        scoring_meta,
+        _clean_outcome(novelty_claimed=True, novelty_validated=False),
+    )
+    assert s2.metadata["novelty_validated"] is False
+
+
 # --------------------------------------------------------------------------- #
 # judge_panel — EXTERNAL_VERIFIER exclusion + reducers
 # --------------------------------------------------------------------------- #
@@ -545,6 +675,83 @@ def test_panel_raises_when_all_judges_excluded(
     )
     with pytest.raises(ValueError, match="no eligible judges"):
         asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_excludes_case_variant_same_family(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (RED→GREEN): EXTERNAL_VERIFIER exclusion must normalize
+    the family label (casefold + strip) on BOTH sides. A generator tagged
+    'claude' MUST drop a judge tagged 'Claude' (or '  CLAUDE ') — a casing/
+    whitespace drift in the family vocabulary previously let a same-family judge
+    vote on its own family's output, the exact self-preference bias §10.2 exists
+    to structurally prevent."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("Claude", True),   # same family, capitalized — MUST drop
+            make_judge("  CLAUDE ", True),  # same family, padded+upper — MUST drop
+            make_judge("qwen", False),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["eligible_count"] == 1  # only qwen survives
+    assert result.metadata["votes"] == [False]
+
+
+def test_panel_none_family_never_equals_concrete(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (contract): a None-family (untagged) judge never equals
+    any concrete generator family — it is admitted as cross-family on operator
+    responsibility, and recorded in ``untagged_judges_seated`` so the operator
+    can SEE it was seated on trust (it cannot be PROVEN cross-family)."""
+    untagged = make_judge(None, True)
+    untagged.model_id = "mystery-model:32b"  # type: ignore[attr-defined]
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # claude dropped, untagged admitted as cross-family-on-trust
+    assert result.metadata["eligible_count"] == 1
+    assert "mystery-model:32b" in result.metadata["untagged_judges_seated"]
+
+
+def test_panel_strict_cross_family_excludes_untagged(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (strict flag): the optional ``strict_cross_family`` flag
+    (default False, preserving panel-emptying semantics) excludes None-family
+    judges that cannot be PROVEN cross-family. Here it empties the panel, routing
+    through the existing empty-panel ValueError."""
+    untagged = make_judge(None, True)
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+        strict_cross_family=True,
+    )
+    with pytest.raises(ValueError, match="no eligible judges"):
+        asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_strict_cross_family_default_keeps_untagged(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-stats-002 (default preserved): with the flag OFF (default), an
+    untagged judge is still admitted — the existing panel-emptying semantics for
+    the all-same-family case are unchanged."""
+    untagged = make_judge(None, True)
+    panel = JudgePanel(
+        judges=[untagged, make_judge("claude", True)],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    assert result.metadata["eligible_count"] == 1
 
 
 def test_panel_median_reducer(scoring_attempt: AttemptState) -> None:
@@ -844,3 +1051,315 @@ def test_panel_surfaces_novelty_validated_verdict(
     )
     result = asyncio.run(panel.score(scoring_attempt))
     assert result.metadata["novelty_validated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — DEGRADE on a flaky judge (scoring-numerics-001, SHARED CONTRACT)
+# --------------------------------------------------------------------------- #
+
+
+def test_panel_degrades_when_one_judge_raises(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-numerics-001 (RED→GREEN, SHARED GRADING-SEAM CONTRACT): a single
+    raising judge (a dead/flaky model runtime) must NOT abort the whole panel.
+    ``JudgePanel.score`` rules on the SURVIVING judges and records the errored
+    judge (id + error) in ``panel.metadata['judges_errored']`` — a partial panel
+    returns a Score, never a bare exception, as long as ≥1 judge survives."""
+    panel = JudgePanel(
+        judges=[
+            make_raising_judge("qwen", RuntimeError("ollama daemon down")),
+            make_judge("mistral", True),
+            make_judge("cohere", True),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # Survivors decided: majority of [True, True] -> True (qwen never voted).
+    assert result.value is True
+    assert result.metadata["votes"] == [True, True]
+    # The errored judge is recorded for auditability (id + error), not silenced.
+    errored = result.metadata["judges_errored"]
+    assert len(errored) == 1
+    assert errored[0]["judge"] == "raiser:qwen"
+    assert "ollama daemon down" in errored[0]["error"]
+    # eligible_count reflects the judges that were RUN; survivors that produced a
+    # score are the panel.
+    assert result.metadata["eligible_count"] == 3
+
+
+def test_panel_empty_when_all_judges_raise_floor_raises(
+    scoring_attempt: AttemptState,
+) -> None:
+    """scoring-numerics-001 (the floor): if EVERY judge raises, zero scores
+    survive — there is no verdict to give, so the existing empty-panel ValueError
+    is the floor (SHARED CONTRACT: raise ONLY when zero judges survived)."""
+    panel = JudgePanel(
+        judges=[
+            make_raising_judge("qwen", RuntimeError("down")),
+            make_raising_judge("mistral", RuntimeError("also down")),
+        ],
+        reducer="majority",
+        generator_family="claude",
+    )
+    with pytest.raises(ValueError, match="no .*judges|empty"):
+        asyncio.run(panel.score(scoring_attempt))
+
+
+def test_panel_median_degrades_over_survivors(
+    scoring_attempt: AttemptState,
+) -> None:
+    """A numeric panel with one raising judge still reduces over the surviving
+    finite votes (the median is taken over survivors, not poisoned to a crash)."""
+    panel = JudgePanel(
+        judges=[
+            make_judge("qwen", 0.3),
+            make_raising_judge("mistral", RuntimeError("timeout")),
+            make_judge("cohere", 0.9),
+        ],
+        reducer="median",
+        generator_family="claude",
+    )
+    result = asyncio.run(panel.score(scoring_attempt))
+    # median of the two survivors {0.3, 0.9} -> 0.6
+    assert result.value == pytest.approx(0.6)
+    assert len(result.metadata["judges_errored"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# judge_panel — median reducer must not return an order-dependent NaN
+# (scoring-numerics-002)
+# --------------------------------------------------------------------------- #
+
+
+def test_reduce_median_drops_non_finite_judge_value() -> None:
+    """scoring-numerics-002 (RED→GREEN): a judge returning NaN must NOT silently
+    poison the panel median (``statistics.median`` over a list containing NaN
+    yields an order-dependent NaN). The reducer drops the non-finite vote and
+    reduces over the finite peers, flagging the drop in metadata."""
+    out = reduce_scores(
+        [
+            Score(value=0.4),
+            Score(value=float("nan")),
+            Score(value=0.8),
+        ],
+        "median",
+    )
+    import math
+
+    assert math.isfinite(out.value)  # type: ignore[arg-type]
+    # median over the finite survivors {0.4, 0.8} -> 0.6
+    assert out.value == pytest.approx(0.6)
+    # the dropped non-finite votes are flagged, not silently swallowed
+    assert out.metadata["non_finite_dropped"] == 1
+
+
+def test_reduce_median_inf_is_dropped() -> None:
+    """An infinite judge value is non-finite too — dropped before the median."""
+    out = reduce_scores(
+        [Score(value=0.5), Score(value=float("inf")), Score(value=0.7)],
+        "median",
+    )
+    import math
+
+    assert math.isfinite(out.value)  # type: ignore[arg-type]
+    assert out.value == pytest.approx(0.6)
+    assert out.metadata["non_finite_dropped"] == 1
+
+
+def test_reduce_median_all_non_finite_raises() -> None:
+    """If EVERY judge value is non-finite there is no finite estimate to report —
+    fail with a clear reason rather than returning a silent NaN."""
+    with pytest.raises(ValueError, match="non-finite|finite"):
+        reduce_scores([Score(value=float("nan")), Score(value=float("inf"))], "median")
+
+
+# --------------------------------------------------------------------------- #
+# oracle — grade() must reject a non-finite solve_quality / time_used
+# (scoring-numerics-003, eval-integrity-adjacent)
+# --------------------------------------------------------------------------- #
+
+
+def test_grade_rejects_nan_solve_quality(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-numerics-003 (RED→GREEN): a NaN ``solve_quality`` currently passes
+    every threshold comparison (``nan < 50`` is False) and emits a non-finite
+    ``Score.value`` with NO failed condition. The gate must close with a
+    ``non_finite_input`` condition and value 0.0 — a NaN never opens the gate."""
+    import math
+
+    outcome = _clean_outcome(solve_quality=float("nan"))
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "non_finite_input" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+    assert math.isfinite(score.value)  # type: ignore[arg-type]
+
+
+def test_grade_rejects_inf_time_used(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """scoring-numerics-003: an infinite ``time_used`` is non-finite too — the gate
+    closes with ``non_finite_input`` (and ``over_time_budget`` may also fire; the
+    point is the gate is CLOSED and the value is a finite 0.0)."""
+    outcome = _clean_outcome(time_used=float("inf"))
+    score = grade(scoring_attempt, scoring_meta, outcome)
+    assert score.metadata["gate_passed"] is False
+    assert "non_finite_input" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+
+
+def test_grade_finite_inputs_have_no_non_finite_condition(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """A normal (finite) clean solve must NOT spuriously carry non_finite_input."""
+    score = grade(scoring_attempt, scoring_meta, _clean_outcome())
+    assert "non_finite_input" not in score.metadata["failed_conditions"]
+
+
+# --------------------------------------------------------------------------- #
+# Epic-4 catalog primitives: Newcombe diff CI / Fisher p / BH-FDR / e-process
+# --------------------------------------------------------------------------- #
+
+
+def test_newcombe_diff_zero_when_rates_equal() -> None:
+    """Equal proportions → delta 0 and a CI that straddles 0 (no difference)."""
+    lower, upper, delta = newcombe_wilson_diff(10, 20, 10, 20)
+    assert delta == 0.0
+    assert lower < 0.0 < upper
+
+
+def test_newcombe_diff_excludes_zero_for_strong_gap() -> None:
+    """A strong gap (18/20 vs 2/20) yields a positive CI that excludes 0."""
+    lower, upper, delta = newcombe_wilson_diff(18, 20, 2, 20)
+    assert delta == pytest.approx(0.8)
+    assert lower > 0.0  # the difference is real — CI excludes 0
+
+
+def test_newcombe_diff_sign_flips_with_argument_order() -> None:
+    """Swapping the two systems negates the delta and mirrors the interval."""
+    lo1, up1, d1 = newcombe_wilson_diff(18, 20, 2, 20)
+    lo2, up2, d2 = newcombe_wilson_diff(2, 20, 18, 20)
+    assert d2 == pytest.approx(-d1)
+    assert lo2 == pytest.approx(-up1)
+    assert up2 == pytest.approx(-lo1)
+
+
+def test_newcombe_diff_stays_in_unit_diff_range() -> None:
+    """At the 20/20-vs-0/20 extreme the bounds stay within [-1, 1]."""
+    lower, upper, delta = newcombe_wilson_diff(20, 20, 0, 20)
+    assert delta == 1.0
+    assert -1.0 <= lower <= upper <= 1.0
+
+
+def test_newcombe_diff_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(5, 0, 1, 10)  # n1 = 0
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(11, 10, 1, 10)  # s1 > n1
+    with pytest.raises(ValueError):
+        newcombe_wilson_diff(5, 10, 1, 10, conf=1.5)  # bad conf
+
+
+def test_fisher_difference_pvalue_near_one_for_equal() -> None:
+    """Identical proportions → no evidence of a difference → p ≈ 1."""
+    assert fisher_difference_pvalue(10, 20, 10, 20) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_fisher_difference_pvalue_small_for_strong_gap() -> None:
+    """A strong gap is significant at conventional levels."""
+    assert fisher_difference_pvalue(18, 20, 2, 20) < 0.001
+
+
+def test_fisher_difference_pvalue_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        fisher_difference_pvalue(1, 0, 1, 10)
+    with pytest.raises(ValueError):
+        fisher_difference_pvalue(11, 10, 1, 10)
+
+
+def test_benjamini_hochberg_empty_is_empty() -> None:
+    assert benjamini_hochberg([], q=0.10) == []
+
+
+def test_benjamini_hochberg_all_tiny_all_survive() -> None:
+    survived = benjamini_hochberg([0.0001, 0.0002, 0.0003], q=0.10)
+    assert survived == [True, True, True]
+
+
+def test_benjamini_hochberg_none_survive_when_all_large() -> None:
+    survived = benjamini_hochberg([0.9, 0.8, 0.95], q=0.10)
+    assert survived == [False, False, False]
+
+
+def test_benjamini_hochberg_step_up_rejects_below_threshold() -> None:
+    """Classic step-up: with m=4, q=0.10 the sorted p's [0.005,0.02,0.03,0.5]
+    have cutoffs 0.025,0.05,0.075,0.10 → the three small p's pass, 0.5 fails, and
+    the result preserves INPUT order."""
+    survived = benjamini_hochberg([0.5, 0.005, 0.03, 0.02], q=0.10)
+    assert survived == [False, True, True, True]
+
+
+def test_benjamini_hochberg_is_less_conservative_than_bonferroni() -> None:
+    """A p above Bonferroni (q/m) but under its BH step still survives.
+
+    m=3, q=0.30 → Bonferroni cut q/m=0.10; BH cuts are 0.10, 0.20, 0.30. The
+    0.15 p-value is above Bonferroni's 0.10 but under its rank-2 BH cut (0.20),
+    so BH rejects it where Bonferroni would not.
+    """
+    survived = benjamini_hochberg([0.05, 0.15, 0.9], q=0.30)
+    assert survived[0] is True and survived[1] is True and survived[2] is False
+
+
+def test_benjamini_hochberg_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        benjamini_hochberg([0.1], q=0.0)
+    with pytest.raises(ValueError):
+        benjamini_hochberg([1.2], q=0.10)
+
+
+def test_eprocess_positive_for_high_success_run() -> None:
+    """A near-saturated run (19/20) accumulates positive log-evidence for H1."""
+    assert bernoulli_log_eprocess(19, 20, p0=0.90, p1=0.97) > 0.0
+
+
+def test_eprocess_negative_for_low_success_run() -> None:
+    """A low-success run is evidence AGAINST saturation (negative log-e)."""
+    assert bernoulli_log_eprocess(5, 20, p0=0.90, p1=0.97) < 0.0
+
+
+def test_eprocess_accumulates_across_runs_to_threshold() -> None:
+    """Two clean 20/20 runs cross the demotion threshold ln(1/0.05)=ln(20);
+    a single 20/20 run does not (dwell is emergent — CONTRACT §B)."""
+    import math
+
+    one = bernoulli_log_eprocess(20, 20, p0=0.90, p1=0.97)
+    two = one + bernoulli_log_eprocess(20, 20, p0=0.90, p1=0.97)
+    assert one < math.log(20.0)   # one lucky run cannot demote
+    assert two >= math.log(20.0)  # sustained evidence does
+
+
+def test_eprocess_expectation_is_one_at_h0_boundary() -> None:
+    """e-value validity: E[e_run] = 1 under H0 at the boundary p=p0 (it is a test
+    martingale). Sum over all outcomes of P(x|p0)·exp(log_e(x)) == 1."""
+    import math
+
+    from scipy.stats import binom
+
+    n, p0, p1 = 8, 0.90, 0.97
+    expectation = sum(
+        binom.pmf(x, n, p0) * math.exp(bernoulli_log_eprocess(x, n, p0=p0, p1=p1))
+        for x in range(n + 1)
+    )
+    assert expectation == pytest.approx(1.0, abs=1e-9)
+
+
+def test_eprocess_rejects_bad_inputs() -> None:
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 0, p0=0.9, p1=0.97)
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 10, p0=0.0, p1=0.97)
+    with pytest.raises(ValueError):
+        bernoulli_log_eprocess(5, 10, p0=0.9, p1=1.0)

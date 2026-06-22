@@ -1,0 +1,63 @@
+{
+  "repo": "dogfood-lab/ai-crucible",
+  "swarm": "dogfood-swarm",
+  "started": "2026-06-21",
+  "coordinator_model": "claude-opus-4-8",
+  "save_point_tag": "swarm-baseline-2026-06-21",
+  "working_branch": "dogfood-swarm",
+  "baseline": {
+    "tests_passed": 473,
+    "coverage_pct": 91.5,
+    "verify": "green",
+    "note": "README badge claims 96% — drift to fix (actual 91.5%)",
+    "post_stage_a_tests": 520,
+    "post_stage_a_coverage_pct": 93.01,
+    "post_stage_b_tests": 576,
+    "post_stage_b_coverage_pct": 94.5,
+    "post_stage_c_tests": 594,
+    "post_stage_c_coverage_pct": 94.51
+  },
+  "cross_family_verifiers": {
+    "roster_live_verified_2026-06-21": {
+      "deepseek-v4-pro:cloud": "DeepSeek (NEW, coding specialist)",
+      "kimi-k2.6:cloud": "Moonshot (NEW, frontier coding)",
+      "qwen3-coder:480b-cloud": "Qwen/Alibaba (480B, code-specialized)",
+      "glm-5:cloud": "Z.ai (NEW, 744B, replaces retired glm-4.6)",
+      "gpt-oss:120b-cloud": "OpenAI (120B, fast)",
+      "deepseek-v3.1:671b-cloud": "DeepSeek (671B, readouts default)",
+      "minimax-m3:cloud": "MiniMax (1M ctx + vision)",
+      "nemotron-3-ultra:cloud": "NVIDIA (largest Nemotron)"
+    },
+    "stage_a_panel": [
+      "deepseek-v4-pro:cloud",
+      "kimi-k2.6:cloud",
+      "qwen3-coder:480b-cloud",
+      "glm-5:cloud",
+      "gpt-oss:120b-cloud"
+    ],
+    "retired": [
+      "glm-4.6 (410, 2026-06-16)",
+      "minimax-m2 (410, 2026-06-16)"
+    ],
+    "discipline": "verify returned model field == requested modulo -cloud suffix (tier-timeout falls back to local hermes3:8b); 2-3 families vote on every HIGH/CRITICAL (convergence = highest confidence); synthesize against code, do not relay; cloud runs server-side (zero local GPU)",
+    "harness": "adapted from E:/AI/readouts/xrpl-knowledge/scripts/verify_cloud.py (crash-safe incremental, _norm_model fallback guard, refute-by-default external rubric)",
+    "generator_family": "anthropic/claude (excluded from verifier panel)"
+  },
+  "orchestration": "Workflow tool (audit fan-out only) + coordinator-driven cross-family verify harness (Ollama Cloud) + coordinator synthesis-against-source",
+  "product_caveats": {
+    "circular_omega": "alt-test omega is still the model-jury bootstrap (no human labels yet); ALL judge seats provisional; below-quorum escalates to Claude Designer. Director-deferred — do NOT fake a human-labeling round. DO audit honest disclosure + escalation correctness."
+  },
+  "domains": {
+    "kernel-core": "kernel.py, roles.py, sandbox.py, budget.py, engagement.py, framing.py, eval_awareness.py, puzzle.py, types.py",
+    "scoring-stats": "scoring/oracle.py, scoring/judge_panel.py, scoring/stats.py, observability.py, trace.py, attestation.py",
+    "characterize": "characterize/*.py (metrics, profile, aggregate, run, human_labels, panel_store)",
+    "calibration-instrument": "calibration/*.py, instrument/*.py",
+    "models-cli": "models/*.py, cli.py, __main__.py, __init__.py",
+    "test-integrity": "tests/*.py, conftest.py, fixtures (cross-cutting: vacuous/half-invariant tests, flake, coverage gaps)",
+    "ci-supply-docs": ".github/workflows/*.yml, pyproject.toml, verify.sh + honesty surfaces (README/SCORECARD/SHIP_GATE/SECURITY/CHANGELOG) — FOUND not fixed by agents; docs coordinator-authored per LAW"
+  },
+  "phases": {
+    "stage-a": "Bug/Security/Correctness/Eval-integrity audit -> cross-family verify -> review gate -> amend (v2 mechanics)",
+    "status": "HEALTH PASS COMPLETE (A+B+C); Stage D folds to Phase 10; next: feature audit (user gate)"
+  }
+}

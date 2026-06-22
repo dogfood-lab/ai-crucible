@@ -271,6 +271,79 @@ def test_assert_no_chrome_leak_tolerates_non_string_content() -> None:
     assert_no_chrome_leak(weird, chrome)  # rank 7 not present → must not raise.
 
 
+def test_assert_no_chrome_leak_RAISES_on_critique_field_token() -> None:
+    """PROVE RED (kernel-core-001): a chrome value carried in a message's
+    ``critique`` field — the field the enabled Critic actually populates
+    (roles.py Critic.message → {role, critique, anonymized}, NO ``content`` key) —
+    MUST raise SealedBoundaryViolation.
+
+    The guard formerly scanned only ``message['content']``, so a chrome token in a
+    Critic-appended critique bypassed BOTH the role _ChromeGuard and the kernel's
+    post-Critic re-check (the whole sealed-boundary point — fail toward 'possible
+    leak' — was defeated for an entire class of scored-context message). The guard
+    must mirror ``_stringify``'s value-walk and scan EVERY string-valued field."""
+    chrome = build_chrome(leaderboard=[{"solver": "solver-zeta", "score": 99}])
+    leaked = [
+        {"role": "system", "content": "You are completing a task."},
+        # The Critic's real appended shape: text lives under 'critique', not 'content'.
+        {
+            "role": "critic",
+            "critique": "The leading entry is from solver-zeta; surpass it.",
+            "anonymized": True,
+        },
+    ]
+    with pytest.raises(SealedBoundaryViolation, match="solver-zeta"):
+        assert_no_chrome_leak(leaked, chrome)
+
+
+def test_assert_no_chrome_leak_scans_arbitrary_string_fields() -> None:
+    """Sibling probe (FAMILY-OF-CALL-SITES): the value-walk must catch a chrome
+    token in ANY string-valued message field, not a hardcoded {content, critique}
+    pair — so a future message-mutating site that writes under a new key cannot
+    reopen the hole. The role label value is harmless to scan and may match a
+    generic word, so we use a distinctive chrome token under an arbitrary key."""
+    chrome = build_chrome(catalog_standing={"badge": "grandmaster"})
+    leaked = [{"role": "user", "verdict": "defend your grandmaster title"}]
+    with pytest.raises(SealedBoundaryViolation, match="grandmaster"):
+        assert_no_chrome_leak(leaked, chrome)
+
+
+def test_sealed_boundary_violation_carries_code_and_hint() -> None:
+    """PROVE RED (error-hint-sweep-003): the raised message must follow the repo's
+    structured-error shape — a stable ``[SEALED_BOUNDARY_LEAK]`` code prefix and an
+    explicit ``(hint: ...)`` telling the operator/designer what to DO (keep chrome
+    out of scored context) — matching PuzzleLoadError / ModelMismatchError. The
+    precise leak naming (token, index, role) must be preserved alongside it."""
+    chrome = build_chrome(rank=7, cohort_size=12)
+    leaked = [
+        {"role": "system", "content": "You are completing a task."},
+        {"role": "user", "content": "Find the bug. You are currently ranked 7 of 12."},
+    ]
+    with pytest.raises(SealedBoundaryViolation) as exc:
+        assert_no_chrome_leak(leaked, chrome)
+    msg = str(exc.value)
+    assert msg.startswith("[SEALED_BOUNDARY_LEAK]"), msg
+    assert "(hint:" in msg, msg
+    # The actionable remediation: keep chrome out of the scored context.
+    assert "chrome" in msg.lower()
+    # The precise leak naming is preserved (token, message index, role).
+    assert "'7'" in msg
+    assert "message[1]" in msg
+    assert "user" in msg
+
+
+def test_assert_no_chrome_leak_clean_critique_field_passes() -> None:
+    """A critique-field message with NO chrome token must still pass — the broader
+    value-walk must not introduce false positives on the new field."""
+    chrome = build_chrome(leaderboard=[{"solver": "solver-zeta"}])
+    clean = [
+        {"role": "system", "content": "You are completing a task."},
+        {"role": "critic", "critique": "Consider the off-by-one at line 7.",
+         "anonymized": True},
+    ]
+    assert_no_chrome_leak(clean, chrome)  # must not raise.
+
+
 def test_default_arm_context_never_leaks_chrome(sample_meta: PuzzleMeta) -> None:
     """End-to-end sealed-boundary check on the DEFAULT path: the self-referential
     scored context built from real prior scores, checked against a fully-populated

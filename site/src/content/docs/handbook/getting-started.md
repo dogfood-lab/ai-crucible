@@ -162,3 +162,26 @@ asyncio.run(main())
 To measure *consistency* rather than a single shot, use `run_pass_hat_k(puzzle, model, k, ...)`,
 which runs `k` independent sibling attempts and collects them into a `PuzzleHistory` you can query for
 `pass^k` and Wilson intervals. Both entry points are documented in the **[API reference](./reference/)**.
+
+## The CLI: run, catalog, probe
+
+The same machinery is operator-runnable. Every `run` **accumulates in the durable catalog**, so the
+instrument builds a capability-evolution timeline across sessions:
+
+```bash
+# Run one diagnostic cycle (the @family tag picks the adapter; a model that solves via
+# native function-calls — not just the text action protocol — Solves through the same sandbox):
+ai-crucible run puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+
+# Read + curate the catalog (the Lab → Arena → Regression lifecycle + the differential typology):
+ai-crucible catalog list                  # tiers + per-puzzle typology + the defer-fraction health metric
+ai-crucible catalog show <puzzle-id>      # one puzzle: runs, transition timeline, differential, would-graduate-now
+ai-crucible catalog graduate              # PREVIEW transitions (mutates nothing); --apply to commit;
+                                          # --override <id> --to arena --by designer:<you> for an attested promotion
+
+# Eval-awareness boundary gate: does behaviour diverge between deploy- and test-framing?
+ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+```
+
+Operator chrome goes to **STDERR**; a machine-readable JSON summary goes to **STDOUT**, so the
+commands compose into CI gates. Run `ai-crucible --help` for the full surface.

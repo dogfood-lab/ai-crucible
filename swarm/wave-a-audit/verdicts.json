@@ -1,0 +1,594 @@
+{
+ "panel": [
+  "deepseek-v4-pro:cloud",
+  "qwen3-coder:480b-cloud",
+  "glm-5:cloud",
+  "kimi-k2.6:cloud",
+  "gpt-oss:120b-cloud"
+ ],
+ "n_findings": 22,
+ "verdicts": [
+  {
+   "id": "kernel-core-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "unclear",
+     "reasoning": "The guard indeed only scans message['content'], missing the 'critique' field used by the Critic role. However, chrome tokens are never shown to the model, so the model's critique is extremely unlikely to contain them; the guard gap is real but the realistic trigger probability is very low, downgrading severity from HIGH to MEDIUM.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that `assert_no_chrome_leak` only inspects `message['content']`, while Critic-generated messages store their text in `message['critique']`, creating a scanning blind spot. This allows chrome to enter scored context undetected, bypassing both role-level and kernel-level checks, and the provided test case confirms this path is triggerable.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The test test_chrome_leak_after_critic_turn_raises gives false assurance by injecting into messages[0]['content'] (which IS scanned) rather than the critique field the Critic actually populates.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "kernel-core-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The test mutates attempt.messages[0]['content'] in-place rather than appending a new message with the 'critique' field, which means it doesn't actually test the Critic's real output path. This creates a false sense of security about the Critic boundary being sealed when the actual leak vector remains untested, directly impacting measurement integrity.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-stats-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code uses score.value > 0 to determine solved, ignoring the gate_passed metadata. A passing attempt with net score <= 0 (due to penalties) is misclassified as unsolved, directly corrupting pass^k, solve_rate, and graduation logic. This is a real, triggerable measurement bug with HIGH severity.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code clearly implements a solve-check that ignores the authoritative gate_passed flag and instead relies on score.value > 0, which can be false even when the oracle gate is passed. This directly leads to miscounting solved attempts in observability metrics, affecting graduation decisions and leaderboard standings.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms _attempt_solved() uses value > 0 while ignoring the authoritative gate_passed flag in metadata, creating a direct mismatch between oracle's pass verdict and observability's solve count. Penalties are unbounded relative to solve, so a passing gate with net<=0 (e.g., solve=10, regressional=-50) is realistically triggerable and would silently under-report solves, potentially flipping graduation verdicts per §1 Wilson-based rules.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 3,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-stats-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "Python's case-sensitive `!=` means a generator tagged 'claude' will not exclude a judge tagged 'Claude', and independently maintained family tags make such casing drift a realistic trigger. Because the EXTERNAL_VERIFIER exclusion is a load-bearing seal of this measurement instrument, a same-family judge surviving panel selection is explicitly rubric-classified as a HIGH-severity integrity breach, not a medium defense-in-depth gap.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-stats-003",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The _is_novel function checks for a metadata key that grade() never sets, so attempts scored only by the oracle will always report novelty as false. This can cause the leaderboard to under‑report a model's novelty rate, a concrete measurement error that justifies a higher severity than LOW.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "scoring-stats-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code evidence shows observability.aggregate_pass_hat_k returns 1.0 for k<=0, while the finding claims stats.pass_hat_k raises ValueError for k<1. This is a genuine contract inconsistency between two modules that are intended to converge. It is currently latent because k>=1 is always used, but a future unification or caller swap would trigger the mismatch, making it triggerable. The severity is correctly rated LOW as it does not currently flip verdicts or leak oracle data.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "characterize-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The finding correctly identifies that the bias panel reports a PASSING gate when no bias trials were actually conducted, creating a misleading impression of measurement validity. This misrepresentation of instrument state as 'measured 0.0' rather than 'not measured' violates the honesty contract and could mask actual bias in judges, making it a HIGH severity issue for a measurement instrument.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "characterize-002",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms build_profile is called without human_human_kappa in the else branch, so the default 0.80 is used. The value IS stamped in metadata (recoverable), docs disclose the fabrication, and seats carry [review] flags—so human-facing honesty is preserved. This is a machine-readable disclosure gap, not a measurement-integrity breach; LOW is appropriate.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "calibration-instrument-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The finding accurately describes that bump_on_change is pure, unused in src/, and mis-documented as enforcing an invariant. Since the measurement boundary actually relies on compile_bundle's sound content hash—which correctly fingerprints all scoring surfaces—the realistic consequence is only version-label drift or maintainer confusion, warranting LOW rather than MEDIUM.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "calibration-instrument-002",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The code indeed strips leading zeros when incrementing numeric segments, so a date‑style version like '2026.06' becomes '2026.7'. This can mislead auditors tracking releases, and the path is realistic for maintainers using zero‑padded dates.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "calibration-instrument-003",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code uses >=0.5, so exact ties on even re-runs collapse to True, which can shift the boolean matrix used by prune_items; this is a real, triggerable behavior with only minor impact on calibration item selection, matching LOW severity.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "models-cli-001",
+   "claimed_severity": "HIGH",
+   "cloud_verdicts": [
+    {
+     "verdict": "false_positive",
+     "severity_assessment": "deflate",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "no",
+     "reasoning": "The finding claims that a generator tagged 'unknown' does NOT exclude a same-distribution 'unknown' judge, but the described exclusion logic (drop if judge_family == generator_family) would actually exclude them, making self-judging impossible. The real bug is over-exclusion (fail-safe), not the claimed silent same-family judge.",
+     "model": "deepseek-v4-pro"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code assigns 'unknown' as a literal string instead of None, which violates the documented contract and can cause same-family judges to incorrectly pass exclusion checks. This directly leads to the realistic consequence of a model judging its own family's output when both are tagged 'unknown', breaking the EXTERNAL_VERIFIER guarantee.",
+     "model": "qwen3-coder:480b"
+    },
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "Code assigns literal 'unknown' instead of None for untagged models, violating the documented contract that untagged judges should return None and be treated as external. When a tagged model shares the same real family as an untagged model, the 'unknown' != tagged-family comparison passes and the same-family judge survives exclusion—explicitly HIGH-worthy per rubric's 'same-family judge not excluded' criterion. Finding's example (both untagged) is imperfect; real trigger is mixed tagged/untagged from same family.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 3,
+    "real": 2,
+    "false_positive": 1,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM",
+     "HIGH",
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "models-cli-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms the response is returned without any check of the `model` field against the requested model. For a sealed measurement instrument, silent mis-attribution of judgments to the wrong model/family corrupts measurement integrity and could flip pass/fail verdicts, meeting the rubric's HIGH threshold for 'mis-reports a measurement' and 'breaks external-verifier' when family tags are wrong.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "models-cli-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The unconditional `return 0` is a real, triggerable gap: when every model errors out, the CLI writes an empty report and exits successfully, causing dependent automation to treat a total measurement failure as a passing run.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "models-cli-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The code indeed hardcodes 'v0.2.0' in the usage banner while _version() reads package metadata, creating a latent consistency bug. This can manifest on any version bump, but impacts only cosmetic display, not measurement integrity.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "test-integrity-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The README badge is a static URL not generated from actual coverage runs, so it can (and per the finding does) drift from the true measured value. This is a documentation/honesty issue, not a measurement-integrity breach, and MEDIUM severity is appropriate.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "test-integrity-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "The code evidence confirms that parse failures are silently converted to incorrect answers (1 - gold_num) without any tests covering this behavior, which directly impacts measurement integrity. This can be triggered by any judge output that fails parsing, leading to biased accuracy metrics and potentially incorrect panel decisions, making it a realistic and serious measurement integrity issue.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "test-integrity-003",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The skip behavior exists exactly as described—Windows without Developer Mode/admin privileges cannot create symlinks and the tests honestly skip. The severity is correctly calibrated: CI validates on ubuntu-latest, and the containment is structural (Path.resolve()), making this a local-observability gap rather than an unguarded boundary.",
+     "model": "glm-5"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "ci-supply-docs-001",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "deflate",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The hardcoded badge does overstate coverage by 4.5 percentage points, but this is purely a documentation drift issue with no impact on the sealed measurement boundary, grading logic, or test execution. Per the rubric, cosmetic README inaccuracies fall below MEDIUM since they cannot flip a verdict or compromise the instrument.",
+     "model": "kimi-k2.6"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  },
+  {
+   "id": "ci-supply-docs-002",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "inflate",
+     "corrected_severity": "HIGH",
+     "triggerable": "yes",
+     "reasoning": "SECURITY.md describes a hardened Docker container that is not shipped; the only provided sandbox is a plain subprocess lacking those hardening measures, so operators may rely on a non‑existent isolation layer, causing a realistic security‑boundary breach.",
+     "model": "gpt-oss:120b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "HIGH"
+    ]
+   }
+  },
+  {
+   "id": "ci-supply-docs-003",
+   "claimed_severity": "MEDIUM",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "MEDIUM",
+     "triggerable": "yes",
+     "reasoning": "The gate document explicitly states the repo is not a CLI/npm package, but the codebase includes a CLI entry point and an npm package, causing those gate items to be skipped. This is a real documentation defect that would lead to skipped verification steps, but the impact is limited to release process integrity, not the measurement boundary, so MEDIUM is appropriate.",
+     "model": "deepseek-v4-pro"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "MEDIUM"
+    ]
+   }
+  },
+  {
+   "id": "ci-supply-docs-004",
+   "claimed_severity": "LOW",
+   "cloud_verdicts": [
+    {
+     "verdict": "real",
+     "severity_assessment": "agree",
+     "corrected_severity": "LOW",
+     "triggerable": "yes",
+     "reasoning": "The documentation error is real and matches the evidence shown - SHIP_GATE.md incorrectly states 'crucible-0.2.0' while actual build artifacts are 'ai_crucible-0.2.0'. This is a cosmetic documentation inconsistency with no runtime or measurement impact.",
+     "model": "qwen3-coder:480b"
+    }
+   ],
+   "consensus": {
+    "n_reviewers": 1,
+    "real": 1,
+    "false_positive": 0,
+    "uncertain": 0,
+    "verdict": "real",
+    "severity_votes": [
+     "LOW"
+    ]
+   }
+  }
+ ]
+}

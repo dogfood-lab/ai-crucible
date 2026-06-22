@@ -286,6 +286,24 @@ def test_clean_prose_does_not_trip_chrome_guard() -> None:
     assert out.messages[-1]["content"].startswith("Read config.py")
 
 
+def test_chrome_access_error_carries_code_and_hint() -> None:
+    """PROVE RED (error-hint-sweep-003): the raised ChromeAccessError message must
+    follow the repo's structured-error shape — a stable ``[CHROME_ACCESS]`` code
+    prefix and an explicit ``(hint: ...)`` telling the designer what to DO (keep
+    rank/leaderboard/standings out of ``messages``; move the value into the Chrome
+    object) — matching PuzzleLoadError / ModelMismatchError. The exception TYPE and
+    control flow are unchanged; only the message text is enriched."""
+    state = _attempt()
+    state.chrome = Chrome(rank=7, cohort_size=12)
+    with pytest.raises(ChromeAccessError) as exc:
+        anyio.run(_leaking_role("You are ranked 7 of 12 on the leaderboard.").act, state)
+    msg = str(exc.value)
+    assert msg.startswith("[CHROME_ACCESS]"), msg
+    assert "(hint:" in msg, msg
+    # The actionable remediation names the surface to keep clean / where chrome lives.
+    assert "messages" in msg.lower() or "chrome" in msg.lower()
+
+
 # --------------------------------------------------------------------------- #
 # Critic default-off (§10.3)
 # --------------------------------------------------------------------------- #

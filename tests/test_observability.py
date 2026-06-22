@@ -197,9 +197,25 @@ def test_aggregate_pass_hat_k_basic() -> None:
 
 def test_aggregate_pass_hat_k_edge_cases() -> None:
     assert aggregate_pass_hat_k([], 3) == 0.0  # no evidence
-    assert aggregate_pass_hat_k([], 0) == 1.0  # empty conjunction holds
-    assert aggregate_pass_hat_k([True, False], 0) == 1.0
-    assert aggregate_pass_hat_k([True], -1) == 1.0
+    assert aggregate_pass_hat_k([], 1) == 0.0  # no evidence, smallest valid k
+
+
+def test_aggregate_pass_hat_k_rejects_k_below_one() -> None:
+    """scoring-stats-004 (RED→GREEN): the pass^k consistency horizon is k ≥ 1
+    (you can't be consistent over fewer than one trial). observability's
+    aggregator MUST share ``stats.pass_hat_k``'s raise contract — it previously
+    returned 1.0 for k ≤ 0, the opposite of the scoring module's ValueError, so
+    the two implementations of the SAME named metric disagreed at the boundary
+    (a latent inconsistency the Wave-2 unification would have surfaced)."""
+    with pytest.raises(ValueError):
+        aggregate_pass_hat_k([True, False], 0)
+    with pytest.raises(ValueError):
+        aggregate_pass_hat_k([True], -1)
+    # The two pass^k implementations now agree at the k<1 boundary.
+    from ai_crucible.scoring import pass_hat_k as stats_pass_hat_k
+
+    with pytest.raises(ValueError):
+        stats_pass_hat_k(1, 2, 0)
 
 
 def test_wilson_interval_bounds_and_empty() -> None:
@@ -279,6 +295,84 @@ def test_non_completed_attempt_is_not_a_solve() -> None:
     hist.add(a)
     assert hist.outcomes == [False]
     assert hist.n_solved == 0
+
+
+def _gated_attempt(
+    *,
+    gate_passed: bool,
+    value: float,
+    attempt_id: str = "att-g",
+    puzzle_id: str = "pz-1",
+    terminated_by: TerminatedBy | None = TerminatedBy.COMPLETED,
+) -> AttemptState:
+    """An attempt whose oracle Score carries the authoritative ``gate_passed``
+    flag in metadata (as :func:`ai_crucible.scoring.oracle.grade` records it),
+    decoupled from the tiebreaker ``value`` (scoring-stats-001)."""
+    a = AttemptState(
+        attempt_id=attempt_id,
+        puzzle_id=puzzle_id,
+        model="claude-opus-4-8",
+        terminated_by=terminated_by,
+    )
+    a.scores["oracle"] = Score(value=value, metadata={"gate_passed": gate_passed})
+    return a
+
+
+def test_passed_gate_with_nonpositive_net_is_a_solve() -> None:
+    """scoring-stats-001 (RED→GREEN): the authoritative solve signal is the
+    §8.3 gate verdict (``metadata['gate_passed']``), NOT the tiebreaker net.
+
+    A clean gate pass (solved, no regression, over threshold, no critical
+    penalty, in budget) whose net lands ≤ 0 because a non-critical
+    REGRESSIONAL penalty outweighs solve+bonuses MUST still count as a solve.
+    Reading ``value > 0`` mis-derives it as UNSOLVED and corrupts pass^k /
+    solve-rate / graduation rollups."""
+    neg = _gated_attempt(gate_passed=True, value=-40.0)
+    zero = _gated_attempt(gate_passed=True, value=0.0, attempt_id="att-z")
+
+    hist = PuzzleHistory(puzzle_id="pz-1")
+    hist.add(neg)
+    hist.add(zero)
+    assert hist.outcomes == [True, True]
+    assert hist.n_solved == 2
+
+    prof = ModelProfile(model="claude-opus-4-8")
+    prof.add(neg)
+    prof.add(zero)
+    assert prof.n_solved == 2
+
+
+def test_failed_gate_with_positive_net_is_not_a_solve() -> None:
+    """scoring-stats-001 (companion): the gate verdict is authoritative in BOTH
+    directions — a closed gate is not a solve even if a (meaningless) positive
+    net leaked into ``value``. grade() zeroes ``value`` on a closed gate, but we
+    assert the gate flag dominates regardless."""
+    a = _gated_attempt(gate_passed=False, value=92.0)
+    hist = PuzzleHistory(puzzle_id="pz-1")
+    hist.add(a)
+    assert hist.outcomes == [False]
+    assert hist.n_solved == 0
+
+
+def test_gate_passed_does_not_override_nonterminal_status() -> None:
+    """scoring-stats-001 (guard preserved): a non-COMPLETED termination is never
+    a solve, even with gate_passed=True — the terminal-status guard wins."""
+    a = _gated_attempt(
+        gate_passed=True, value=92.0, terminated_by=TerminatedBy.BUDGET
+    )
+    hist = PuzzleHistory(puzzle_id="pz-1")
+    hist.add(a)
+    assert hist.outcomes == [False]
+
+
+def test_score_without_gate_envelope_falls_back_to_truthy() -> None:
+    """scoring-stats-001 (fallback): a score lacking the oracle gate envelope
+    (e.g. a bool Inspect-style 'C'/True score) still resolves via the tolerant
+    truthy path — the gate-flag preference must not break non-oracle scores."""
+    hist = PuzzleHistory(puzzle_id="pz-1")
+    hist.add(_attempt(attempt_id="b1", solved=True))   # bool value, no gate key
+    hist.add(_attempt(attempt_id="b2", solved=False))
+    assert hist.outcomes == [True, False]
 
 
 def test_model_profile_rollup() -> None:

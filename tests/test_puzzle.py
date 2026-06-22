@@ -122,6 +122,58 @@ def test_schema_violation_raises(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Size guard at the §1 trust boundary (kernel-runtime-003) — prove RED
+# --------------------------------------------------------------------------- #
+
+
+def test_oversized_prompt_is_rejected(tmp_path: Path) -> None:
+    """An over-cap prompt file is refused with a structured PuzzleLoadError BEFORE
+    it is slurped whole into memory (kernel-runtime-003, §1 trust boundary).
+
+    The puzzle directory is an external/authored artifact; an unbounded read.text
+    of a multi-gigabyte prompt would OOM the kernel before any budget/sandbox cap
+    applies. The loader stats the file first and rejects an oversized prompt with
+    INPUT_PROMPT_TOO_LARGE (size + cap in the hint), mirroring the sandbox's own
+    1 MiB output cap. Caps are overridable so the test plants a tiny cap rather
+    than a real multi-MiB file."""
+    from ai_crucible.puzzle import MAX_PROMPT_BYTES
+
+    _write_min_puzzle(tmp_path, with_setup=False)
+    # Replace the prompt with one that exceeds a deliberately tiny cap.
+    (tmp_path / "prompt").write_text("x" * 4096, encoding="utf-8")
+    with pytest.raises(PuzzleLoadError, match="INPUT_PROMPT_TOO_LARGE"):
+        load_puzzle(tmp_path, max_prompt_bytes=1024)
+    # And the default cap is a sane positive ceiling (a few MiB).
+    assert MAX_PROMPT_BYTES >= 1_000_000
+
+
+def test_oversized_meta_is_rejected(tmp_path: Path) -> None:
+    """An over-cap meta.json is refused with INPUT_META_TOO_LARGE before json.loads
+    reads the whole file (kernel-runtime-003). The meta cap is tighter (~1 MiB) than
+    the prompt cap; this plants a tiny override to prove the gate without a real
+    1 MiB file."""
+    from ai_crucible.puzzle import MAX_META_BYTES
+
+    meta = _min_meta_dict()
+    # Pad the JSON with a large ignored-by-validation field to exceed the tiny cap.
+    meta["_pad"] = "y" * 4096
+    (tmp_path / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    (tmp_path / "prompt").write_text("p", encoding="utf-8")
+    with pytest.raises(PuzzleLoadError, match="INPUT_META_TOO_LARGE"):
+        load_puzzle(tmp_path, max_meta_bytes=1024)
+    assert MAX_META_BYTES >= 1_000_000
+
+
+def test_prompt_at_cap_loads(tmp_path: Path) -> None:
+    """A prompt exactly at the cap is admitted (the guard rejects *over* the cap,
+    not at it) — guards against an off-by-one false rejection."""
+    _write_min_puzzle(tmp_path, with_setup=False)
+    (tmp_path / "prompt").write_text("z" * 1024, encoding="utf-8")
+    loaded = load_puzzle(tmp_path, max_prompt_bytes=1024)
+    assert len(loaded.prompt) == 1024
+
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 

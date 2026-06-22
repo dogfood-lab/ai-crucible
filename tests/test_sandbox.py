@@ -315,6 +315,93 @@ def test_write_file_rejects_symlink_escape(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Cross-platform path-confinement INVARIANT (no real symlink, no skip)
+# --------------------------------------------------------------------------- #
+#
+# test-integrity-003: the two real-symlink tests above pytest.skip on a Windows
+# runner that lacks SeCreateSymbolicLinkPrivilege (Developer Mode / admin), so the
+# escape-rejection INVARIANT they prove has NO non-skipped guard on that OS. The
+# tests below prove the same containment invariant — ``_resolve_within`` rejects a
+# path whose *resolved* target lands outside the workdir — WITHOUT needing the OS
+# to create a symlink, so the security invariant is guarded on every platform.
+
+
+def test_resolve_within_rejects_constructed_escaping_path(tmp_path: Path) -> None:
+    """A path that resolves OUTSIDE the workdir is rejected by ``_resolve_within``,
+    proven cross-platform via a constructed ``..`` escape (no symlink needed).
+
+    This exercises the real containment predicate (resolved == root or root in
+    resolved.parents) directly, so the §10.4 confinement invariant has a guard that
+    never skips — unlike the real-symlink tests, which skip without the Windows
+    privilege."""
+    work = tmp_path / "work"
+    work.mkdir()
+    box = LocalSandbox(root=work)
+    try:
+        # A relative path that climbs out of the workdir resolves to tmp_path —
+        # outside root — and must be rejected.
+        with pytest.raises(PermissionError):
+            box._resolve_within("../escapee.txt")
+        # An absolute path outside the workdir is likewise rejected.
+        outside = tmp_path / "outside.txt"
+        with pytest.raises(PermissionError):
+            box._resolve_within(str(outside))
+    finally:
+        box.cleanup()
+
+
+def test_resolve_within_rejects_symlink_target_outside_root_mocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Simulate a symlink escape on ANY OS by mocking ``Path.resolve`` so an
+    in-workdir path resolves to a target OUTSIDE root — exactly the shape a symlink
+    escape produces — and assert ``_resolve_within`` still rejects it.
+
+    INVARIANT-MUTATION (RED proof): the protected thing is the resolved target's
+    location. Here we MUTATE it to land outside root and assert the guard FIRES. If
+    the containment check were a naive string-prefix or were removed, this escaping
+    target would pass — so a passing guard is load-bearing, not vacuous. No real
+    symlink and no special privilege are required, so this runs on every platform
+    (Windows included), unlike the real-symlink tests that skip without
+    SeCreateSymbolicLinkPrivilege (test-integrity-003)."""
+    work = (tmp_path / "work").resolve()
+    work.mkdir()
+    box = LocalSandbox(root=work)
+    escaped_target = (tmp_path / "outside" / "secret.txt").resolve()
+
+    real_resolve = Path.resolve
+
+    def fake_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        # The candidate the guard joins is ``root / "link.txt"``; pretend resolving
+        # it (i.e. following a symlink) yields a target outside the workdir.
+        if self == work / "link.txt":
+            return escaped_target
+        return real_resolve(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    try:
+        with pytest.raises(PermissionError):
+            box._resolve_within("link.txt")
+    finally:
+        box.cleanup()
+
+
+def test_resolve_within_admits_in_root_path(tmp_path: Path) -> None:
+    """Control: a benign in-workdir path resolves INSIDE root and is admitted — the
+    containment guard must not over-reject a legitimate relative path (so the
+    rejection tests above prove a real, discriminating invariant, not a guard that
+    rejects everything)."""
+    work = (tmp_path / "work").resolve()
+    work.mkdir()
+    box = LocalSandbox(root=work)
+    try:
+        resolved = box._resolve_within("sub/dir/note.txt")
+        assert resolved == work / "sub" / "dir" / "note.txt"
+    finally:
+        box.cleanup()
+
+
+# --------------------------------------------------------------------------- #
 # THE sealed-boundary property: the oracle is NOT in the Solver's namespace
 # --------------------------------------------------------------------------- #
 
@@ -460,3 +547,22 @@ def test_copy_workdir_out_refuses_existing_dest(tmp_path: Path) -> None:
     dest.mkdir()  # already exists
     with pytest.raises(FileExistsError):
         copy_workdir_out(src, dest)
+
+
+def test_write_file_preserves_lf_no_crlf_translation() -> None:
+    """write_file must land bytes verbatim — no platform newline translation.
+
+    On Windows the default ``Path.write_text`` rewrites ``\n`` -> ``\r\n``, which
+    corrupts a staged bash script (``set -euo pipefail\r`` -> bash rejects it) and
+    any LF-sensitive file. The sandbox is a faithful write channel; LF stays LF on
+    every OS. (epic-1 staging finding; sibling of the path.sep blind-spot.)
+    """
+    box = LocalSandbox()  # async context manager — construct + cleanup directly here
+    try:
+        content = "set -euo pipefail\nmkdir -p x\necho done\n"
+        asyncio.run(box.write_file("setup.sh", content))
+        raw = (box.root / "setup.sh").read_bytes()
+    finally:
+        box.cleanup()
+    assert b"\r\n" not in raw, "write_file must not translate LF to CRLF"
+    assert raw == content.encode("utf-8")

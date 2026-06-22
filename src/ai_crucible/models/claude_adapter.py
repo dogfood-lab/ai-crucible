@@ -41,19 +41,34 @@ Standards compliance (the six — workflow-standards.md)
   model client; the panel reads ``.family`` for same-family exclusion; gold labels
   live with the grader, not the adapter). The one addition: this adapter reads a
   **secret** (``ANTHROPIC_API_KEY``) — it does so at call time from the env and never
-  logs or stores it.
+  logs or stores it. Like the Ollama adapter, :meth:`complete` verifies the served
+  model (the Messages API ``model`` echo) matches the requested one and raises
+  :class:`~ai_crucible.models.ollama_adapter.ModelMismatchError` on a silent route to a
+  different model, so the ``"claude"`` family tag is never attributed to a judgment a
+  different model produced (§11.6 / models-cli-002). Resilience (§8.6): :meth:`complete`
+  wraps the API call in the same BOUNDED retry/backoff as the Ollama adapter (with a
+  Claude-specific transient classifier) so a connect/5xx blip costs ~1s, not the run —
+  covering an injected client that lacks the SDK's built-in retry (models-ollama-
+  resilience-001); a 4xx and a ``ModelMismatchError`` are never retried.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 from ai_crucible.characterize.types import JudgmentRecord
+from ai_crucible.models.ollama_adapter import (
+    ModelMismatchError,
+    _call_with_retry,
+    _norm_model,
+)
 from ai_crucible.scoring.judge_panel import JudgeFn
 from ai_crucible.types import AttemptState, Score
 
-__all__ = ["ClaudeModel", "ClaudeClient"]
+__all__ = ["ClaudeModel", "ClaudeClient", "ModelMismatchError"]
 
 #: The fixed model family for every ClaudeModel — the panel excludes a judge of this
 #: family when Claude is the generator (EXTERNAL_VERIFIER, §10.2).
@@ -61,6 +76,41 @@ CLAUDE_FAMILY = "claude"
 
 #: Default ceiling on generated tokens per request (pinned for replayability).
 _DEFAULT_MAX_TOKENS = 4096
+
+#: Default bounded retry policy (§8.6, PIN_PER_STEP). The Anthropic SDK has its own
+#: internal retry default, so this is a thin belt-and-braces layer that also covers an
+#: *injected* client (tests / non-SDK wiring) which has no built-in retry, keeping the
+#: resilience contract identical across both adapters (models-ollama-resilience-001).
+#: ``max_retries`` is the number of *additional* attempts after the first; the backoff is
+#: ``base * 2**i`` seconds before retry ``i``.
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_RETRY_BACKOFF_BASE = 0.5
+
+
+def _is_transient_claude(exc: BaseException) -> bool:
+    """Is ``exc`` a transient Anthropic call failure worth retrying (§8.6)?
+
+    Retryable: a connection error, a request timeout, or a 5xx from the API — the
+    Anthropic SDK exposes these as ``APIConnectionError`` / ``APITimeoutError`` /
+    ``InternalServerError`` (and ``APIStatusError`` with a 5xx ``status_code``). NOT
+    retryable: a 4xx (``BadRequestError`` / ``AuthenticationError`` / etc. — retrying
+    won't help) or a :class:`ModelMismatchError` (a provenance breach the andon must see).
+    The ``anthropic`` SDK is imported lazily so the module still imports without it; with
+    no SDK installed, only :class:`ModelMismatchError` exclusion applies and nothing else
+    is treated as transient.
+    """
+    if isinstance(exc, ModelMismatchError):
+        return False
+    try:
+        import anthropic
+    except ImportError:
+        return False
+    if isinstance(exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        status = getattr(exc, "status_code", None)
+        return isinstance(status, int) and 500 <= status < 600
+    return False
 
 
 class ClaudeClient(Protocol):
@@ -143,6 +193,13 @@ class ClaudeModel:
         quant: kept for surface-parity with the Ollama adapter and recorded in the
             JudgmentRecord; hosted Claude is not user-quantized, so it is ``None`` in
             practice.
+        max_retries: bounded *additional* attempts after the first on a transient call
+            failure (§8.6); ``0`` disables. Pinned and recorded in :meth:`pin_metadata`
+            (models-ollama-resilience-001).
+        retry_backoff_base: seconds for the first backoff; attempt ``i`` waits
+            ``base * 2**i`` before the next try.
+        sleep: injected async sleep for backoff (default :func:`asyncio.sleep`); tests
+            pass a zero-cost stub so the suite never sleeps for real.
     """
 
     family = CLAUDE_FAMILY
@@ -154,11 +211,17 @@ class ClaudeModel:
         client: ClaudeClient | None = None,
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         quant: str | None = None,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        retry_backoff_base: float = _DEFAULT_RETRY_BACKOFF_BASE,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.model_id = model_id
         self._client = client
         self.max_tokens = max_tokens
         self.quant = quant
+        self.max_retries = max_retries
+        self.retry_backoff_base = retry_backoff_base
+        self._sleep = sleep
 
     # -- provenance (PIN_PER_STEP) ------------------------------------------ #
 
@@ -175,6 +238,10 @@ class ClaudeModel:
             "family": self.family,
             "quant": self.quant,
             "options": {"temperature": 0, "max_tokens": self.max_tokens},
+            "retry": {
+                "max_retries": self.max_retries,
+                "backoff_base": self.retry_backoff_base,
+            },
         }
 
     # -- client resolution (lazy, secret read at call time) ----------------- #
@@ -203,6 +270,13 @@ class ClaudeModel:
         Splits leading ``system`` turns to the top-level ``system`` parameter
         (:func:`_split_system`), sends ``temperature=0`` + the pinned ``max_tokens``,
         and concatenates the returned text blocks (:func:`_extract_text`).
+
+        Resilience (§8.6): the single API call is wrapped in a BOUNDED retry/backoff
+        (:func:`~ai_crucible.models.ollama_adapter._call_with_retry` with the Claude-
+        specific :func:`_is_transient_claude` classifier) so a transient connect/5xx blip
+        costs ~1s, not the whole run — covering an *injected* client (which has no built-in
+        retry) and adding a thin belt over the SDK's own (models-ollama-resilience-001). A
+        4xx and a :class:`ModelMismatchError` are never retried.
         """
         client = self._resolve_client()
         system, turns = _split_system(messages)
@@ -214,8 +288,41 @@ class ClaudeModel:
         }
         if system is not None:
             kwargs["system"] = system
-        response = await client.messages.create(**kwargs)
+
+        async def _call() -> Any:
+            return await client.messages.create(**kwargs)
+
+        response = await _call_with_retry(
+            _call,
+            max_retries=self.max_retries,
+            backoff_base=self.retry_backoff_base,
+            sleep=self._sleep,
+            is_transient=_is_transient_claude,
+        )
+        self._assert_served_matches(response)
         return _extract_text(response)
+
+    def _assert_served_matches(self, response: Any) -> None:
+        """Raise :class:`ModelMismatchError` if the served model != the requested one.
+
+        The Messages API echoes the model that actually answered in a top-level ``model``
+        field (``response.model`` on the SDK object, ``response["model"]`` on a dict). If
+        the API silently routes to a different model (e.g. an alias/snapshot resolving
+        elsewhere), this surfaces it as an exception rather than letting a JudgmentRecord
+        be stamped with the requested ``model_id`` while a different model produced the
+        judgment (§11.6 / models-cli-002 — the same provenance guard the Ollama adapter
+        enforces). A *missing* ``model`` field is tolerated (older/fake responses that do
+        not echo it), so the guard fails closed only on a *positive* mismatch.
+        """
+        served = (
+            response.get("model")
+            if isinstance(response, dict)
+            else getattr(response, "model", None)
+        )
+        if isinstance(served, str) and served and _norm_model(served) != _norm_model(
+            self.model_id
+        ):
+            raise ModelMismatchError(self.model_id, served)
 
     # -- kernel generate plug (§10.2) --------------------------------------- #
 

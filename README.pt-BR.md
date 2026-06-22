@@ -3,53 +3,56 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/dogfood-lab/ai-crucible/main/assets/logo.png" alt="ai-crucible" width="400" />
+  <img src="https://raw.githubusercontent.com/dogfood-lab/ai-crucible/main/assets/logo.png" alt="ai-crucible" width="500" />
 </p>
 
 <p align="center">
   <a href="https://github.com/dogfood-lab/ai-crucible/actions/workflows/ci.yml"><img src="https://github.com/dogfood-lab/ai-crucible/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
-  <img src="https://img.shields.io/badge/coverage-96%25-brightgreen.svg" alt="Coverage 96%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-orange.svg" alt="Version 0.2.0" /></a>
+  <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
 <p align="center"><b>A diagnostic adversarial game for frontier LLMs — a measurement instrument that happens to be fun.</b></p>
 
-Uma sessão do Claude (**Designer**) cria desafios que visam lacunas de capacidade reais e atualmente observadas. Outra (**Solver**) tenta resolvê-los. Um kernel, com políticas aplicadas, faz a mediação, avalia com base em um oráculo oculto e organiza um catálogo por meio de um ciclo de vida `Lab → Arena → Regression`. Os desafios são baseados em dados empíricos — problemas reais do GitHub, literatura acadêmica, falhas observadas no campo — e não em dados sintéticos.
+Uma sessão do Claude (**Designer**) cria quebra-cabeças com o objetivo de abordar lacunas de capacidade reais e atualmente observadas. Outro (**Solver**) tenta resolvê-los. Um kernel com políticas aplicadas atua como intermediário, avalia os resultados em relação a um oráculo oculto e organiza um catálogo por meio de um ciclo de vida `Lab → Arena → Regression`. Os quebra-cabeças são baseados em dados empíricos — problemas reais do GitHub, literatura acadêmica, falhas observadas no campo — e não em dados sintéticos.
 
-## O que o torna diferente
+## O que o torna diferente?
 
-- **Capacidade, não "trapaça".** O Crucible distingue *elegância* e *novidade* (recompensadas) de *desvio da resposta* (penalizado). O pensamento lateral é uma capacidade a ser medida, não um defeito a ser punido.
-- **O instrumento mede a si mesmo.** A formulação do prompt é um componente de medição de primeira classe — o kernel executa o mesmo desafio sob formulações `neutra` / `autorreferencial` / `social_standings` e relata seu próprio efeito do prompt como um diagnóstico.
-- **Uma fronteira de medição selada.** A motivação e a medição nunca compartilham uma janela de contexto; o oráculo oculto é avaliado fora da banda por uma família de modelos diferente, com o raciocínio do agente oculto. O modelo não pode manipular o que não consegue perceber.
-- **Confiabilidade por consistência.** `pass^k` (todas as *k* tentativas independentes têm sucesso), intervalos de Wilson e painéis de avaliação inter-familiares — criados para relatar distribuições, não estimativas pontuais.
-- **Um catálogo dinâmico.** Os desafios resolvidos são *rebaixados* para `Regression`, nunca excluídos, para que o catálogo se torne uma linha do tempo da evolução das capacidades à medida que a fronteira avança.
+- **Capacidade, não "trapaça".** O AI Crucible distingue *elegância* e *novidade* (recompensadas) de *desvio da resposta* (penalizado). O pensamento lateral é uma capacidade a ser medida, não um defeito a ser punido.
+- **O instrumento mede a si mesmo.** A formulação do prompt é um elemento medido de primeira classe — o kernel executa o mesmo quebra-cabeça sob formulações `neutra` / `autorreferencial` / `social_standings` e relata seu próprio efeito do prompt como um diagnóstico.
+- **Uma fronteira de medição selada.** A motivação e a medição nunca compartilham uma janela de contexto; o oráculo oculto é avaliado externamente por uma família diferente de modelos, com o raciocínio do agente oculto. O modelo não pode manipular algo que não consegue perceber.
+- **Confiabilidade pela consistência.** `pass^k` (todas as *k* tentativas independentes têm sucesso), intervalos de Wilson e painéis de avaliação inter-familiares — criados para relatar distribuições, não estimativas pontuais.
+- **Um catálogo dinâmico e duradouro.** As execuções são acumuladas em sessões em um log com rastreamento de eventos e encadeamento por hash (a fonte da verdade); o estado da camada é uma projeção derivada. A progressão `Lab → Arena` leva em consideração a **abstenção** — promove apenas com base em um veredicto confiável entre famílias diferentes e, caso contrário, **avança para o Designer**; quebra-cabeças saturados são **rebaixados para `Regression`, nunca excluídos** (um processo eletrônico anti-repetitivo), de modo que o catálogo se torna uma linha do tempo da evolução das capacidades à medida que a fronteira avança.
+- **O benefício diferencial.** Por quebra-cabeça, a taxa de resolução do Claude em comparação com a coorte inter-familiar classifica a lacuna — **específica do Claude** (valor mais alto) / **geral para LLM** / **ponto forte do Claude** — com base em um intervalo de diferença de Newcombe com uma classe *inconclusiva* de primeira classe, para que um resultado nulo pequeno nunca seja disfarçado como uma descoberta.
+- **Mede qualquer família de modelos.** Os solvers que usam o protocolo nativo de chamada de função (e não apenas o protocolo de ação de texto) são considerados elementos de primeira classe — um modelo que retorna chamadas de ferramentas em vez de ações de texto resolve por meio do mesmo ambiente controlado.
 
 ## Modelo de ameaças (resumo)
 
-O principal adversário do Crucible é o **modelo em avaliação**, que pode tentar acessar a chave de resposta ou detectar e manipular a avaliação. Ele **acessa**: prompts/configuração do desafio, o próprio diretório de trabalho restrito do Solver e as chamadas da API do provedor do modelo que o operador configura. Ele **não** acessa: o oráculo/chave de resposta (avaliado fora da banda em um host separado que o Solver não pode acessar) ou elementos de motivação ("chrome" — classificação/posição — nunca injetados no contexto avaliado). **Permissões:** chaves do provedor do modelo por meio de variáveis de ambiente em tempo de execução; sem segredos embutidos, sem telemetria, sem chamadas externas próprias. Divulgação completa — incluindo onde uma fronteira é uma *defesa em profundidade* em vez de uma garantia absoluta — está em **[SECURITY.md](SECURITY.md)**.
+O principal adversário do AI Crucible é o **modelo sob medição**, que pode tentar acessar a chave de resposta ou detectar e manipular a avaliação. Ele **acessa**: prompts/configuração dos quebra-cabeças, o próprio diretório de trabalho restrito do Solver e as chamadas da API do provedor de modelos que o operador configura. Ele **não acessa**: o oráculo/chave de resposta (avaliado externamente em um host separado ao qual o Solver não pode acessar) ou elementos motivacionais ("aparência" — classificação/posição — nunca injetados no contexto avaliado). **Permissões:** chaves do provedor de modelos por meio de variáveis de ambiente em tempo de execução; sem segredos incluídos, sem telemetria, sem chamadas externas próprias. Divulgação completa — incluindo onde uma fronteira é *defesa em profundidade* em vez de uma garantia rígida — está em **[SECURITY.md](SECURITY.md)**.
 
 ## Arquitetura
 
-O Crucible é uma **camada de política fina sobre [Inspect AI](https://inspect.aisi.org.uk/)** (UK AISI), não um conjunto de ferramentas criado do zero. Um único objeto `AttemptState` é passado de Designer → Solver → (Critic) → Judge por meio de **um único ponto de estrangulamento `generate`**, para que cada chamada de modelo e ferramenta seja observável.
+O AI Crucible é uma **camada de política fina sobre [Inspect AI](https://inspect.aisi.org.uk/)** (UK AISI), e não um conjunto de ferramentas criado do zero. Um único objeto `AttemptState` é transmitido do Designer → Solver → (Crítico) → Avaliador por meio de **um único ponto de estrangulamento `generate`**, para que cada chamada de modelo e ferramenta seja observável.
 
 | Módulo | Responsabilidade |
 | ------ | -------------- |
-| `puzzle_loader` | Carrega um diretório de desafios (`meta.json` / `prompt` / `setup_script`) no estado visível ao Solver. **Nunca acessa o oráculo.** |
-| `sandbox` | Canal restrito `exec` / `read_file` / `write_file` em um contêiner bloqueado e sem rede. |
-| `roles` | Os cinco slots de função (Designer / Solver / Critic / Judge / CohortSolver). Apenas o Solver tem ferramentas; o Critic é reservado para a interface, desativado por padrão. |
-| `budget_governor` | Chamada de ferramenta por classe + orçamentos de tempo decorrido, exibidos ao agente, aplicados no lado do kernel; interrupção forçada em loops patológicos. |
-| `oracle_scorer` | Avaliação fora da banda: resolvido **e** sem regressão em relação ao oráculo oculto (padrão SWE-bench). |
-| `judge_panel` | Painel inter-família de avaliadores de modelo + redutor (PoLL) para validação de novidade e detecção de desvio. |
-| `trace_writer` | Transcrição por tentativa no formato Inspect `EvalLog`; grandes blocos armazenados por hash. |
-| `observability` | Agregações por tentativa → por desafio → por modelo; `pass^k` nativo. |
-| `attestation` | Provável criptográfica (cosign + event-store) por trás de uma fronteira de subprocesso tipada. |
+| `puzzle_loader` | Carrega um diretório de quebra-cabeças (`meta.json` / `prompt` / `setup_script`) no estado visível ao Solver. **Nunca acessa o oráculo.** |
+| `sandbox` | Cria um canal restrito para `exec` / `read_file` / `write_file` em um contêiner bloqueado e sem rede. |
+| `roles` | Os cinco slots de função (Designer / Solver / Crítico / Avaliador / CohortSolver). Apenas o Solver tem acesso a ferramentas; o Crítico é reservado para a interface, desativado por padrão. |
+| `budget_governor` | Orçamentos por classe para chamadas de ferramentas + tempo decorrido, exibidos ao agente, aplicados no nível do kernel; interrupção forçada em loops patológicos. |
+| `oracle_scorer` | Avaliação externa: resolvido **e** sem regressão em relação ao oráculo oculto (padrão SWE-bench). |
+| `judge_panel` | Painel inter-familiar de avaliadores de modelos + redutor (PoLL) para validação de novidade e detecção de desvio. |
+| `trace_writer` | Transcrição por tentativa no formato `EvalLog` do Inspect; grandes blocos armazenados por hash. |
+| `observability` | Agregações por tentativa → por quebra-cabeça → por modelo; `pass^k` nativo. |
+| `catalog` | Persistência duradoura com rastreamento de eventos + o ciclo de vida `Lab → Arena → Regression` (progressão considerando a abstenção, validação em qualquer momento) + a tipologia diferencial. Baseado no log encadeado por hash do `attestation`. |
+| `attestation` | Provável criptográfica (cosign + armazenamento de eventos) atrás de uma fronteira de sub-processo tipada. |
 
-A fronteira selada é executada em três níveis — **Nível 1** contexto avaliado (moldado pela implantação, neutro em termos de formulação), **Nível 2** formulação de engajamento (verificado quanto à contaminação em cada lançamento), **Nível 3** elementos visuais (classificação/tabela de classificação — interface voltada para o usuário, nunca em um contexto no qual o modelo resolve). A justificativa completa do projeto, com citações, está em [`docs/research-grounding.md`](docs/research-grounding.md).
+A fronteira selada é executada em três camadas — **Camada 1** contexto avaliado (moldado pela implantação, formulação neutra), **Camada 2** formulação do engajamento (verificada quanto à contaminação a cada lançamento), **Camada 3** elementos visuais (classificação/tabela de classificação — interface voltada para o usuário, nunca em um contexto no qual o modelo resolve). A justificativa completa do projeto, com citações, está em [`docs/research-grounding.md`](docs/research-grounding.md).
 
-## Instalar
+## Instalação
 
 ```bash
 # As a Python library + CLI (PyPI):
@@ -60,11 +63,30 @@ ai-crucible --help
 npx @dogfood-lab/ai-crucible --help
 ```
 
-> **Versão de teste para pesquisa (v0.2.x).** O teste alternativo ω do painel de avaliadores ainda é um *modelo circular de avaliação por jurados*, até que seja realizada uma rodada de avaliação humana. Assim, os avaliadores presentes são **provisórios** e o painel formado **passa a ser um Claude Designer** quando não atinge o quórum. Consulte a [tabela de resultados](SCORECARD.md) para obter os resultados honestos e objetivos.
+**Execute um ciclo de diagnóstico** — um Solver tenta resolver um quebra-cabeça no ambiente controlado, avaliado externamente em relação ao oráculo selado, emitindo o `pass^k` / agregação de Wilson:
+
+```bash
+# @family selects the adapter: no tag / @claude -> Claude (ANTHROPIC_API_KEY);
+# any other @family -> a local Ollama model of that family (text OR native tool-calls).
+ai-crucible run puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+```
+
+Cada execução **é acumulada no catálogo duradouro**. Leia e organize-o ou execute a verificação da fronteira de conscientização sobre avaliação:
+
+```bash
+ai-crucible catalog list                 # tiers + per-puzzle differential typology + health
+ai-crucible catalog show <puzzle-id>     # one puzzle: runs, transition timeline, differential
+ai-crucible catalog graduate             # preview Lab->Arena->Regression transitions (--apply to commit)
+
+# Eval-awareness gate: does behaviour diverge between deploy- and test-framing?
+ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+```
+
+> **Prévia da pesquisa (v0.3.x).** O teste alternativo ω do painel de avaliadores ainda é um *modelo circular de simulação de júri*: para validá-lo, é necessário realizar uma rodada com **≥3 avaliadores humanos independentes** (o [teste alternativo](https://arxiv.org/abs/2501.10970)), o que um estúdio com apenas um avaliador humano não consegue fazer — portanto, essa rodada está **suspensa por restrição estrutural, e não por negligência**. Os avaliadores permanecem em estado **provisório**, o painel formado **é expandido para incluir um Claude Designer** quando o número mínimo de participantes não é atingido, e o instrumento revela isso em vez de simular uma base humana. Consulte a [tabela de resultados](SCORECARD.md) para obter os resultados honestos e objetivos da avaliação.
 
 ## Início rápido (a partir do código-fonte)
 
-O Crucible usa [`uv`](https://docs.astral.sh/uv/) para gerenciamento de ambiente e dependências. Python **3.11+**.
+O AI Crucible utiliza [`uv`](https://docs.astral.sh/uv/) para o gerenciamento do ambiente e das dependências. Python **3.11+**.
 
 ```bash
 # Create the venv and install the dev + stats extras
@@ -82,14 +104,14 @@ bash verify.sh
 
 ## Documentação
 
-- **[Handbook](https://dogfood-lab.github.io/crucible/)** — guias, arquitetura e referência.
+- **[Manual](https://dogfood-lab.github.io/ai-crucible/)** — guias, arquitetura e referências.
 - [`docs/research-grounding.md`](docs/research-grounding.md) — justificativa do projeto, com citações.
 - [`docs/gameplan.md`](docs/gameplan.md) — roteiro e questões em aberto.
 - [`SECURITY.md`](SECURITY.md) — modelo de ameaças + divulgação honesta dos riscos residuais.
 
 ## Licença
 
-[MIT](LICENSE). Público e pré-1.0 — consulte o [CHANGELOG](CHANGELOG.md) para o status da versão.
+[MIT](LICENSE). Público e anterior à versão 1.0 — consulte o [REGISTRO DE ALTERAÇÕES](CHANGELOG.md) para obter informações sobre o status da versão.
 
 ---
 
