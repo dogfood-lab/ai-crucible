@@ -60,7 +60,15 @@ ai-crucible --help
 npx @dogfood-lab/ai-crucible --help
 ```
 
-> **Research preview (v0.2.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap* until a human-labeling round runs, so seated judges are **provisional** and the composed panel **escalates to a Claude Designer** below quorum. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
+**Run one diagnostic cycle** — a Solver attempts a puzzle in the sandbox, graded out-of-band against the sealed oracle, emitting the `pass^k` / Wilson rollup:
+
+```bash
+# @family selects the adapter: no tag / @claude -> Claude (ANTHROPIC_API_KEY);
+# any other @family -> a local Ollama model of that family.
+ai-crucible run puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+```
+
+> **Research preview (v0.2.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap*: validating it needs a round of **≥3 independent human annotators** (the [alt-test](https://arxiv.org/abs/2501.10970)), which a single-human studio cannot staff — so that round is **on ice by structural constraint, not neglect**. Seated judges stay **provisional**, the composed panel **escalates to a Claude Designer** below quorum, and the instrument discloses this rather than faking human grounding. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
 
 ## Quick start (from source)
 

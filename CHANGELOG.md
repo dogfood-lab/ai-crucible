@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Dogfood-swarm hardening + the first runnable diagnostic cycle (2026-06-21). Every
+change cross-family-verified (Ollama Cloud panel) and test-first; suite **473 → 677**
+tests, **91.5% → 94.5%** coverage. Pre-1.0 research preview unchanged.
+
+### Added
+- **The instrument RUNS** — `ai-crucible run <puzzle> --model <id>[@family] --k N`
+  executes a real Solver against a puzzle in the sandbox and grades it out-of-band via
+  the puzzle's sealed `oracle/check.py`, emitting the `pass^k` / Wilson rollup. New
+  modules: `oracle_runner` (trace-driven grading), `staging` (setup-script + grading-side
+  bait placement), `solver_loop` (a bounded ReAct `generate`), `cycle` (the wiring).
+  Validated live on two frontier cloud Solvers (qwen3-coder:480b solved the seed cleanly;
+  gpt-oss:120b exercised the bypass paths).
+- **Self-test / discrimination harness** (`self_test.run_self_test`) — proves the
+  instrument distinguishes a known-trivial puzzle (must pass) from a known-impossible one
+  (any pass = a leak) BEFORE a real run, with two calibration puzzles grounded in the
+  `known_groups` acceptance laws.
+- **Adversarial bypass test suite** — every declared bypass vector (answer-key fetch
+  across read/grep/cat, ungrounded fabrication, redundant-call looping, hard-kill) closes
+  the §8.3 gate end-to-end through the real kernel.
+
+### Changed
+- **Eval-integrity — fabricated-but-correct is now a non-solve** (the capability the seed
+  puzzle exists to measure). A non-critical (causal/regressional) penalty that drags a
+  *penalty-adjusted solve floor* (`solve_quality + non-critical penalties`, **bonus-free**)
+  below `point_threshold` now CLOSES the conjunctive gate — a flavor-keyed magnitude clause,
+  not a Goodhart-fragile raw-net test. Study-swarm-grounded (Lightman 2023; Turpin 2023;
+  ImpossibleBench 2025; SWE-bench).
+- **Observability solve-count** keys on the authoritative `gate_passed`, not `score.value > 0`
+  (a gate-passed net≤0 attempt was silently undercounted in pass^k / graduation).
+- **EXTERNAL_VERIFIER family-exclusion hardened** — case/whitespace-normalized comparison,
+  untagged judges represented as `None` (not a colliding `"unknown"`), served-model verified
+  against requested in both adapters, `untagged_judges_seated` surfaced + optional
+  `strict_cross_family`.
+
+### Fixed
+- **Resilience** — the post-Solver grading/panel/log tail degrades to a traced ERROR attempt
+  (Solver transcript preserved) instead of discarding an expensive run on a grading-host
+  blip; `JudgePanel` degrades over surviving judges (one flaky judge no longer aborts the
+  panel); the oracle rejects non-finite `solve_quality`/`time_used`; bounded model retry +
+  structured daemon-down/malformed-body errors; puzzle-loader input size guards.
+- **Sandbox CRLF corruption** — `LocalSandbox.write_file` wrote with platform newline
+  translation, corrupting any script staged through the channel on Windows; now writes bytes
+  verbatim (`newline=""`).
+- **gpt-oss Harmony robustness** — the Ollama adapter strips Harmony control tokens and the
+  solver_loop parser cuts at the first control token, so a gpt-oss Solver's agent loop is no
+  longer shredded by leaked `<|message|>`/`<|channel|>` tokens.
+- **Operator UX** — the CLI renders an escaping error as one structured `[CODE] … (hint:)`
+  line (full traceback only under `--debug`); a run prints the provisional-ω caveat +
+  degraded-run notice + per-model progress; `--help` documents exit codes; `ai-crucible
+  --help` survives a Windows cp1252 console.
+
+### Notes
+- **Retiring the circular ω is ON ICE — by structural constraint, not neglect.** The
+  alt-test (Calderon 2025) needs ≥3 *independent human* annotators; this is a one-human
+  studio, so a defensible human-labeling round cannot be staffed. The seats therefore remain
+  **provisional**, the below-quorum path **escalates to the Claude Designer**, and the
+  instrument **discloses this honestly** (operator-visible caveat) rather than faking human
+  grounding. A future no-humans-needed reduction-of-self-circularity (anchoring ω on an
+  *independent cross-family cloud jury* disjoint from the seated panel) is recorded as a
+  candidate, not built.
+- Deferred to a later cycle: catalog persistence + Lab/Arena/Regression graduation +
+  differential typology (Epic 4); a multi-model Solver protocol reading native `tool_calls`
+  (gpt-oss-cloud returns empty content + structured tool calls, distinct from the
+  token-leak shape); eval-awareness probe wiring + round-against-round generation.
+
 ## [0.2.0] - 2026-06-01
 
 Phase-1 milestone: the policy-enforced kernel + role contracts + instrument-quality
