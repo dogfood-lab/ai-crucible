@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Dogfood-swarm hardening + the first runnable diagnostic cycle + the durable catalog
-(2026-06-21). Every change cross-family-verified (Ollama Cloud panel) and test-first;
-suite **473 → 783** tests, **91.5% → 94.6%** coverage. Pre-1.0 research preview unchanged.
+## [0.3.0] — 2026-06-21
+
+Dogfood-swarm: hardening + the first runnable diagnostic cycle + the durable catalog +
+the multi-model Solver protocol + the eval-awareness gate. Every change
+cross-family-verified (Ollama Cloud panel) and test-first; suite **473 → 795** tests,
+**91.5% → 94.6%** coverage. Pre-1.0 research preview by design — the version stays **0.x**
+because the judge-panel alt-test ω is still a circular model-jury bootstrap (no ≥3
+independent human annotators a one-human studio can staff), so seats are provisional and
+graduation escalates to the Designer rather than auto-promoting. Honest, disclosed, not
+faked.
 
 ### Added
 - **Eval-awareness boundary gate (§10.5)** — `ai-crucible probe <puzzle> --model …` (and

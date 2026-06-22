@@ -1,6 +1,6 @@
 {
   "name": "@dogfood-lab/ai-crucible",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ai-crucible — a diagnostic measurement instrument: a cross-family panel of local LLM judges under a sealed boundary, scoring against a hidden oracle. Zero-prerequisite npx install via a verified binary launcher. Research preview.",
   "type": "commonjs",
   "license": "MIT",

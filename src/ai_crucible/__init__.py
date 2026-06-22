@@ -10,7 +10,7 @@ docs/research-grounding.md, section 10.2). All cross-module contracts live in
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from ai_crucible.types import (
     AttemptState,

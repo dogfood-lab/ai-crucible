@@ -27,7 +27,7 @@
 
 - [x] `[all]` Errors follow the Structured Error Shape — (2026-06-01) typed exceptions carry a stable `[CODE] message (hint: …)` (e.g. `STATE_ORACLE_IN_META`, `HashChainError`, `PuzzleLoadError`, `SealedBoundaryViolation`); JSON `cause?`/`retryable?` are for the [mcp]/[cli] surfaces (N/A).
 - [x] `[cli]` Exit codes (2026-06-21 — CLI returns `0` success/help/version, `2` unknown command; the `characterize` subcommand returns non-zero on total model failure, models-cli-003)
-- [ ] `[cli]` No raw stack traces without `--debug` — PARTIAL: the expected failure path (total model failure) returns a structured non-zero exit with code/message/hint (models-cli-003); there is no `--debug` flag yet and an *unexpected* exception still surfaces a Python traceback. Flagged as a Stage-C humanization item (top-level CLI handler + `--debug` opt-in).
+- [x] `[cli]` No raw stack traces without `--debug` (2026-06-21 — the `main()` top-level handler renders an escaping exception as a SINGLE structured stderr line: a `[CODE] msg (hint:)` house-shape error verbatim, else a `[CLI_UNEXPECTED] … (hint: re-run with --debug)` wrapper; the full traceback is opt-IN via `--debug`/`-v`. Verified: `run /no/such/dir` → one-line `[INPUT_PUZZLE_DIR_MISSING]` + exit 1; `--debug` → traceback.)
 - [ ] `[mcp]` Tool errors return structured results — SKIP: not an MCP server.
 - [ ] `[mcp]` State/config corruption degrades gracefully — SKIP: not MCP. (The hash-chained event store surfaces `HashChainError` rather than crashing on tamper.)
 - [ ] `[desktop]` User-friendly error messages — SKIP: not a desktop app.
@@ -49,7 +49,7 @@
 - [x] `[all]` Version in manifest matches git tag (2026-06-21 — `pyproject.toml` 0.2.0 == released tag `v0.2.0`; re-verify if this dogfood swarm cuts a new tag at Phase 10)
 - [x] `[all]` Dependency scanning runs in CI (2026-06-01 — `pip-audit` on the resolved runtime deps; runs clean)
 - [ ] `[all]` Automated dependency update mechanism — SKIP: per `.claude/rules/github-actions.md`, no Dependabot unless explicitly requested.
-- [ ] `[npm]` `npm pack --dry-run` — APPLICABLE (the npm launcher `@dogfood-lab/ai-crucible`): it published 0.2.0 with provenance via `release.yml` OIDC (2026-06-02); a fresh `npm pack --dry-run` was not re-run this swarm — re-verify at the next release.
+- [x] `[npm]` `npm pack --dry-run` (2026-06-21 — clean: 11 files, 8.6 kB packed / 27.1 kB unpacked, `@dogfood-lab/ai-crucible`, bin + README + 7 translations; published with provenance via `release.yml` OIDC) — superseding APPLICABLE (the npm launcher `@dogfood-lab/ai-crucible`): it published 0.2.0 with provenance via `release.yml` OIDC (2026-06-02); a fresh `npm pack --dry-run` was not re-run this swarm — re-verify at the next release.
 - [x] `[npm]` engines.node · `[pypi]` `python_requires` set (2026-06-01 — `requires-python = ">=3.11,<3.14"`)
 - [x] `[npm]` Lockfile committed · `[pypi]` Clean wheel + sdist build (2026-06-21 — `uv build` → `ai_crucible-0.2.0` wheel + sdist; `uv.lock` committed)
 - [ ] `[vsix]` `vsce package` — SKIP: not a VS Code extension.

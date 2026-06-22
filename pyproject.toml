@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-crucible"
-version = "0.2.0"
+version = "0.3.0"
 description = "Diagnostic adversarial game for frontier LLMs — a policy-enforced kernel that mediates a Designer/Solver/Judge cycle, scores against a hidden oracle, and curates a Lab/Arena/Regression catalog."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

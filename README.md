@@ -10,8 +10,8 @@
   <a href="https://github.com/dogfood-lab/ai-crucible/actions/workflows/ci.yml"><img src="https://github.com/dogfood-lab/ai-crucible/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
-  <img src="https://img.shields.io/badge/coverage-93%25-brightgreen.svg" alt="Coverage 93%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.2.0-orange.svg" alt="Version 0.2.0" /></a>
+  <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -25,7 +25,9 @@ One Claude session (**Designer**) crafts puzzles targeting real, currently-obser
 - **The instrument measures itself.** Prompt framing is a first-class measured arm — the kernel runs the same puzzle under `neutral` / `self_referential` / `social_standings` framings and reports its own prompt-effect as a diagnostic.
 - **A sealed measurement boundary.** Motivation and measurement never share a context window; the hidden oracle is graded out-of-band by a different model family with the agent's reasoning hidden. The model can't game what it can't perceive.
 - **Reliability by consistency.** `pass^k` (all *k* independent trials succeed), Wilson intervals, and cross-family judge panels — built to report distributions, not point estimates.
-- **A living catalog.** Solved puzzles are *demoted* to `Regression`, never deleted, so the catalog becomes a capability-evolution timeline as the frontier moves.
+- **A living, durable catalog.** Runs accumulate across sessions in an event-sourced, hash-chained log (the source of truth); tier state is a derived projection. Graduation `Lab → Arena` is **abstention-aware** — it promotes only on a confident cross-family verdict and **escalates to the Designer** otherwise; saturated puzzles are **demoted to `Regression`, never deleted** (an anti-flapping e-process), so the catalog becomes a capability-evolution timeline as the frontier moves.
+- **The differential payoff.** Per puzzle, Claude's solve-rate vs the cross-family cohort's classifies the gap — **Claude-specific** (highest value) / **LLM-general** / **Claude-strength** — off a Newcombe difference interval with a first-class *inconclusive* class, so a small-N null is never dressed up as a finding.
+- **Measures any model family.** Solvers using the native function-call protocol (not just the text action protocol) are first-class — a model that returns tool-calls instead of text actions Solves through the same governed sandbox.
 
 ## Threat model (summary)
 
@@ -45,6 +47,7 @@ AI Crucible is a **thin policy layer on [Inspect AI](https://inspect.aisi.org.uk
 | `judge_panel` | Cross-family panel of model-scorers + reducer (PoLL) for novelty validation and bypass detection. |
 | `trace_writer` | Per-attempt transcript in the Inspect `EvalLog` shape; large blobs stored by digest. |
 | `observability` | Per-attempt → per-puzzle → per-model rollups; `pass^k` native. |
+| `catalog` | Event-sourced durable persistence + the `Lab → Arena → Regression` lifecycle (abstention-aware graduation, anytime-valid saturation) + the differential typology. Builds on `attestation`'s hash-chained log. |
 | `attestation` | Cryptographic provenance (cosign + event-store) behind a typed subprocess boundary. |
 
 The sealed boundary runs in three tiers — **Tier 1** scored context (deployment-shaped, framing-neutral), **Tier 2** engagement framing (probed for contamination each release), **Tier 3** chrome (rank/leaderboard — human-facing UI only, never in a context the model solves in). The full design rationale, with citations, is in [`docs/research-grounding.md`](docs/research-grounding.md).
@@ -64,11 +67,23 @@ npx @dogfood-lab/ai-crucible --help
 
 ```bash
 # @family selects the adapter: no tag / @claude -> Claude (ANTHROPIC_API_KEY);
-# any other @family -> a local Ollama model of that family.
+# any other @family -> a local Ollama model of that family (text OR native tool-calls).
 ai-crucible run puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Research preview (v0.2.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap*: validating it needs a round of **≥3 independent human annotators** (the [alt-test](https://arxiv.org/abs/2501.10970)), which a single-human studio cannot staff — so that round is **on ice by structural constraint, not neglect**. Seated judges stay **provisional**, the composed panel **escalates to a Claude Designer** below quorum, and the instrument discloses this rather than faking human grounding. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
+Each run **accumulates in the durable catalog**. Read and curate it, or run the
+eval-awareness boundary probe:
+
+```bash
+ai-crucible catalog list                 # tiers + per-puzzle differential typology + health
+ai-crucible catalog show <puzzle-id>     # one puzzle: runs, transition timeline, differential
+ai-crucible catalog graduate             # preview Lab->Arena->Regression transitions (--apply to commit)
+
+# Eval-awareness gate: does behaviour diverge between deploy- and test-framing?
+ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
+```
+
+> **Research preview (v0.3.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap*: validating it needs a round of **≥3 independent human annotators** (the [alt-test](https://arxiv.org/abs/2501.10970)), which a single-human studio cannot staff — so that round is **on ice by structural constraint, not neglect**. Seated judges stay **provisional**, the composed panel **escalates to a Claude Designer** below quorum, and the instrument discloses this rather than faking human grounding. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
 
 ## Quick start (from source)
 
