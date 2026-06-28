@@ -61,6 +61,7 @@ from ai_crucible.characterize.types import (
     SeatDecision,
 )
 from ai_crucible.models.ollama_adapter import OllamaModel
+from ai_crucible.models.openrouter_adapter import OpenRouterModel
 
 _VERDICT_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
 _CHOICE_RE = re.compile(r"\b([AB])\b")  # case-sensitive: the prompt asks for one letter
@@ -339,7 +340,10 @@ async def run_panel(
             file=sys.stderr,
             flush=True,
         )
-        model = OllamaModel(model_id=model_id, family=family, quant=quant)
+        if model_id.startswith("openrouter:"):
+            model = OpenRouterModel(model_id=model_id, family=family or "", quant=quant)
+        else:
+            model = OllamaModel(model_id=model_id, family=family, quant=quant)
         t0 = time.monotonic()
         try:
             recs, stats = await collect_records(model, items, k=k)
@@ -838,9 +842,17 @@ def _parse_models(specs: list[str]) -> list[tuple[str, str | None, str | None]]:
     for s in specs:
         if "@" in s:
             mid, fam = s.rsplit("@", 1)
-            out.append((mid, fam, None))
         else:
-            out.append((s, None, None))  # untagged → None (NOT the colliding "unknown")
+            mid, fam = s, None
+        # An OpenRouter seat MUST declare its @family — the served id exposes the vendor, but the
+        # cross-family attribution is the operator's call. Refuse fail-fast (before the long run)
+        # rather than seat an unattributable judge (models-cli-001 / EXTERNAL_VERIFIER §10.2).
+        if mid.startswith("openrouter:") and not (fam and fam.strip()):
+            raise ValueError(
+                f"[OPENROUTER_NO_FAMILY] the OpenRouter spec {s!r} needs an explicit @family for "
+                "cross-family attribution (hint: e.g. openrouter:deepseek/deepseek-chat@deepseek)"
+            )
+        out.append((mid, fam, None))  # untagged → fam is None (NOT the colliding "unknown")
     return out
 
 
