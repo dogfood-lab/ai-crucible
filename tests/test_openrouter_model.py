@@ -146,6 +146,25 @@ def test_judge_item_record_shape() -> None:
     assert rec.metadata["options"]["temperature"] == 0
 
 
+def test_extract_text_normalizes_gpt_oss_harmony_leak() -> None:
+    """A gpt-oss judge served via OpenRouter that leaks OpenAI Harmony control tokens into
+    ``content`` is collapsed to its final-channel answer (the shared _normalize_harmony) BEFORE
+    the judge/solver parser sees it — the analysis channel (hidden reasoning) is dropped, the
+    final channel's body is the verdict. Without this an OpenRouter gpt-oss judge mis-grades on
+    the raw leaked string (the same defense the Ollama adapter already applies)."""
+    harmony = (
+        "<|start|>assistant<|channel|>analysis<|message|>hidden reasoning here<|end|>"
+        "<|channel|>final<|message|>B<|end|>"
+    )
+    client = FakeOpenRouterClient(harmony, served_model="openai/gpt-oss-120b")
+    model = OpenRouterModel("openrouter:openai/gpt-oss-120b", family="openai", client=client)
+    rec = asyncio.run(model.judge_item("A: wrong. B: right. Reply with one letter."))
+    assert rec.predicted == "B"  # the final-channel answer, NOT the raw Harmony string
+    # A clean (non-Harmony) deepseek/qwen/cohere response is returned byte-for-byte.
+    clean = OpenRouterModel(_SPEC, family="deepseek", client=FakeOpenRouterClient("A"))
+    assert asyncio.run(clean.judge_item("rate this")).predicted == "A"
+
+
 def test_judge_item_confidence_from_openai_logprob() -> None:
     client = FakeOpenRouterClient("A", first_logprob=-0.10536)  # exp(-0.10536) ≈ 0.90
     model = _model(client)

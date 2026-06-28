@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **A positive `Penalty.weight` would invert a penalty into a bonus.** `Penalty.weight` is now
   constrained `≤ 0` at the schema boundary, rejected at puzzle load instead of silently skipping the
   penalty-adjusted floor close.
+- **A gpt-oss judge served via OpenRouter could mis-grade on leaked Harmony tokens.** The OpenRouter
+  adapter now routes completions through the shared `_normalize_harmony` (identity pass-through for
+  clean responses), collapsing an OpenAI Harmony chat-template leak (`<|channel|>analysis<|message|>…`)
+  to its final-channel answer before the judge/solver parser sees it — the same defense the Ollama
+  adapter already applies.
+- **A salvaged characterization run collapsed the IRT calibration screen to an error.** Per-item
+  salvage can leave one model missing a few items (a ragged matrix); the IRT item-prune screen now
+  degrades to the item subset shared across all models and reports the dropped count, instead of
+  erroring the whole screen (matching the per-pair degradation the panel-correlation screen already had).
 
 ## [0.3.0] — 2026-06-21
 

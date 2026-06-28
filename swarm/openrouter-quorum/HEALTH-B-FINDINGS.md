@@ -26,13 +26,18 @@ confirmed** (2 HIGH, 5 MED, 13 LOW); 1 proposal flagged with an unreal API path 
   fail-closed would false-close them. The runner now injects it ONLY when the puzzle declares it.
   Test added.
 
+## Fixed in the follow-up wave (the two worthwhile MEDs — test-first, suite 835→837)
+- MED — **OpenRouter Harmony-token strip**: `_extract_text` now routes through the shared
+  `_normalize_harmony` (identity pass-through for clean text), so a gpt-oss judge served via
+  OpenRouter is collapsed to its final-channel answer before grading — the Ollama-adapter defense,
+  now applied on the gateway path too.
+- MED — **IRT ragged-matrix degradation**: `irt_prune_report` degrades to the shared-item subset
+  (reporting the ragged drops) instead of collapsing to an error when per-item salvage thins a
+  model's row — matching `pairwise_error_correlation`'s existing per-pair intersection.
+
 ## Deferred (real, lower-value — next health wave / Phase-10)
 - MED — `_SandboxAdapter` hardcodes a 60s per-exec timeout, ignoring the puzzle's
   `time_budget_seconds` (mislabels `terminated_by`). Config-defensive.
-- MED — per-item salvage yields a ragged matrix that collapses the IRT calibration screen to an
-  error instead of degrading to the shared-item subset.
-- MED — OpenRouter adapter does not strip leaked Harmony control tokens, so a gpt-oss/openai-family
-  judge served via OpenRouter can be mis-graded (the Ollama adapter already strips them).
 - MED — calibration loader does not constrain `gold` to the verdict vocabulary (a typo'd gold
   mis-grades silently). NOTE: the auditor's proposed fix cited a wrong file path — re-scope before
   building.
