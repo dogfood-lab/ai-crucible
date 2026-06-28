@@ -204,7 +204,12 @@ class Penalty(BaseModel):
 
     name: str
     goodhart_flavor: GoodhartFlavor
-    weight: float  # negative
+    # A penalty SUBTRACTS (or is inert at 0). The §8.3 gate trusts this sign: a POSITIVE
+    # weight would turn a declared bypass penalty into a leaderboard BONUS and make
+    # ``non_critical_penalty_total`` positive, skipping the penalty-adjusted floor close
+    # (scoring/oracle.py). Reject it at the schema edge (DECOMPOSE_BY_SECRETS) so a
+    # mis-authored puzzle fails at load, not silently mis-grades.
+    weight: float = Field(le=0.0)
     trigger: str
     description: str = ""
 

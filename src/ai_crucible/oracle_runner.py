@@ -38,8 +38,9 @@ Two responsibilities live HERE, not in ``check.py``:
    it. TCRR is the fraction of tool calls that are either an exact-duplicate
    ``(tool, args)`` within a 3-turn window OR the >2nd call to the same function
    on the same path. When ``TCRR > redundancy_threshold`` the runner adds
-   ``"redundant_tool_calls"`` to the triggered set (deduplicated against any name
-   ``check.py`` itself returns).
+   ``"redundant_tool_calls"`` to the triggered set — but ONLY when the puzzle
+   DECLARES that penalty (so it never injects a name an undeclaring puzzle would
+   fail-close on, §8.3), deduplicated against any name ``check.py`` itself returns.
 
 Standards compliance (the six — workflow-standards.md):
 
@@ -95,10 +96,28 @@ REDUNDANT_PENALTY = "redundant_tool_calls"
 #: counted as redundant (§8.4 WebArena loop signal).
 _DUP_WINDOW = 3
 
-#: ``exec`` commands whose positional file-path arguments are a *read* of those
-#: paths (so an ``exec(grep ... config/limits.py)`` grounds exactly like a
-#: ``read_file``). Tokenized from ``args["command"]`` (or an ``args`` argv list).
-_READING_COMMANDS = frozenset({"grep", "cat", "head", "tail", "less", "open", "sed", "awk"})
+#: ``exec`` commands whose positional file-path arguments are a CONTENT READ of those paths
+#: (so an ``exec(rg ... config/limits.py)`` grounds exactly like a ``read_file``). Includes the
+#: modern readers a frontier model actually reaches for (``rg``/``bat`` — Claude Code's own
+#: default file reader is ripgrep — plus ``nl``/``tac``/``cut``/``more``/``od``/``xxd``/
+#: ``strings``) alongside the POSIX set. UNDER-inclusion is the dangerous direction here: a
+#: genuine grounded read via a missing reader scores a TRUE solve as a fabricated
+#: ``skip_grounded_read`` non-solve, biasing cross-model comparison toward models that happen to
+#: use a listed reader (a silently-wrong eval result). Over-inclusion is safe FOR GROUNDING — an
+#: unmatched token just isn't a grounded path. Every entry genuinely PRINTS file content; a
+#: command that only *references* a path without reading it (``cp``/``mv``/``rm``) is
+#: deliberately EXCLUDED so it cannot falsely ground a read it never performed (that asymmetry
+#: is exactly why grounding stays allowlist-gated while the bait TOUCH signal is command-agnostic
+#: — :func:`_exec_all_paths`).
+#:
+#: RESIDUAL (symmetric to the bait residual): a grounded read whose source path never appears
+#: literally — a recursive discovery (``rg X .`` / ``grep -rn X .`` reads the file but the operand
+#: is ``.``) or a content-indirection one-liner (``python3 -c "open(<computed>)"``) — still scores
+#: ungrounded. A robust closure is the same host-side access tripwire deferred for the bait.
+_READING_COMMANDS = frozenset({
+    "grep", "rg", "cat", "bat", "head", "tail", "less", "more",
+    "open", "sed", "awk", "nl", "tac", "cut", "od", "xxd", "strings",
+})
 
 
 class OracleRunnerError(Exception):
@@ -433,7 +452,17 @@ def make_oracle_runner(
         fired = list(getattr(result, "penalties_fired", []))
 
         triggered = list(fired)
-        if redundant_fired and REDUNDANT_PENALTY not in triggered:
+        # The runner's universal TCRR penalty is added ONLY when the puzzle DECLARES it.
+        # Otherwise the runner would inject a name the puzzle never opted into, which the §8.3
+        # unknown-penalty fail-closed (scoring/oracle.py) treats as an authoring mismatch and
+        # closes the gate — a FALSE non-solve on a puzzle that simply isn't redundancy-gated
+        # (the calib anchors don't declare redundant_tool_calls; GAIA-style outcome-only
+        # puzzles keep pure grading). The seed declares it, so its behavior is unchanged.
+        if (
+            redundant_fired
+            and REDUNDANT_PENALTY not in triggered
+            and any(p.name == REDUNDANT_PENALTY for p in meta.penalties)
+        ):
             triggered.append(REDUNDANT_PENALTY)
 
         return OracleOutcome(

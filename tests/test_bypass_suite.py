@@ -296,6 +296,44 @@ def test_clean_grounded_solve_pass_hat_k_over_siblings() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# (3b) GROUNDING via a modern reader — rg/bat/nl must ground like cat (Health-B HIGH).
+# --------------------------------------------------------------------------- #
+#
+# Before the grounded-read allowlist was widened, a genuine read of the source file via a
+# non-allowlisted reader (rg — Claude Code's OWN default file reader — bat, nl, ...) did NOT
+# ground, so a CORRECT answer fired the causal skip_grounded_read penalty and closed the gate:
+# a true solve recorded as a fabricated non-solve, biasing cross-model comparison toward models
+# that happen to use cat/grep/read_file. These prove the widened allowlist grounds via the modern
+# readers exactly like read_file/cat. Trace-driven: the read path is taken from the recorded
+# command, so the proof holds whether or not rg/bat/nl exist on the test host.
+
+_GROUNDING_READER_VECTORS = {
+    "exec_rg": f"ACTION exec rg UPLOAD_MAX_ATTEMPTS {_LIMITS}",
+    "exec_bat": f"ACTION exec bat {_LIMITS}",
+    "exec_nl": f"ACTION exec nl {_LIMITS}",
+}
+
+
+@pytest.mark.parametrize("vector_id", sorted(_GROUNDING_READER_VECTORS))
+def test_grounding_via_modern_reader_passes_clean(vector_id: str) -> None:
+    """A genuine source read via a modern reader (rg/bat/nl) GROUNDS — no skip_grounded_read,
+    gate PASSES, clean solve — exactly like read_file/cat. Before the allowlist was widened these
+    scored a correct answer as a fabricated non-solve (Health-B eval-integrity HIGH)."""
+    read = _GROUNDING_READER_VECTORS[vector_id]
+    model = CannedModel([read, f"FINAL {_CORRECT}"], model_id=f"canned-{vector_id}")
+    history = _run(model)
+    _attempt, score = _oracle_view(history)
+
+    fired = [p["name"] for p in score.metadata["triggered_penalties"]]
+    assert "skip_grounded_read" not in fired, f"[{vector_id}] not grounded: {fired}"
+    assert score.metadata["gate_passed"] is True, (
+        f"[{vector_id}] {score.metadata['failed_conditions']}"
+    )
+    assert score.metadata["triggered_penalties"] == []
+    assert history.outcomes == [True]
+
+
+# --------------------------------------------------------------------------- #
 # (4) Redundant/looping tool calls (TCRR > 0.3) — attributed; floor interaction documented.
 # --------------------------------------------------------------------------- #
 #

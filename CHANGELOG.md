@@ -59,6 +59,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **perturbation_audit jittered two thresholds the decision never reads** (`consistency_floor`,
   `bias_ceiling`), padding the flip-rate denominator and deflating the gate-fragility andon signal; the
   perturbed set now equals the decision-relevant threshold set.
+- **Eval-integrity: a genuine grounded read via a modern reader scored as a fabricated non-solve.**
+  The grounded-read signal counted only an allowlisted reader (`grep`/`cat`/…), so reading the source
+  via `rg`/`bat`/`nl`/`python3 -c` (ripgrep is Claude Code's own default) fired a false
+  `skip_grounded_read` and closed the gate on a correct answer — biasing cross-model comparison and able
+  to corrupt the calibration anchors. The reader allowlist now covers the common content-readers
+  (non-reading commands like `cp`/`mv` stay excluded so they can't falsely ground).
+- **Eval-integrity: an unknown (misspelled) triggered penalty name never closed the gate.** A penalty a
+  puzzle's oracle fires but `meta.json` doesn't declare was surfaced-but-not-scored, so a typo'd CRITICAL
+  penalty (`answer_key_fetchh`) silently skipped the critical veto and an adversarial bypass scored
+  clean. An unresolved triggered name now fails the gate closed (`unknown_penalty_fired`); the runner's
+  universal redundancy penalty is injected only when the puzzle declares it.
+- **A positive `Penalty.weight` would invert a penalty into a bonus.** `Penalty.weight` is now
+  constrained `≤ 0` at the schema boundary, rejected at puzzle load instead of silently skipping the
+  penalty-adjusted floor close.
 
 ## [0.3.0] — 2026-06-21
 
