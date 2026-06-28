@@ -534,29 +534,6 @@ def _grade_matrix(records: dict[str, list[JudgmentRecord]]) -> dict[str, dict[st
     return matrix
 
 
-def _shared_item_matrix(
-    matrix: dict[str, dict[str, bool]],
-) -> tuple[dict[str, dict[str, bool]], list[str]]:
-    """Restrict a possibly-RAGGED grade matrix to the item-ids present for EVERY model.
-
-    Per-item salvage (characterize-degradation-002) drops a few items for one model on a
-    transient per-item fault, leaving that model's row shorter than its peers. The §12 IRT
-    screen (:func:`irt.prune_items`) needs an identical item set across models, so rather than
-    collapsing the WHOLE screen to an error on a partial drop (a thinned-but-valid panel is not
-    a malformed one), degrade to the SHARED item subset — the same per-pair-intersection
-    graceful degradation :func:`aggregate.pairwise_error_correlation` already applies on the
-    same ragged input. Returns ``(restricted_matrix, dropped_ragged_item_ids)`` so the
-    degradation is legible (reported), not silent.
-    """
-    if not matrix:
-        return matrix, []
-    item_sets = [set(row) for row in matrix.values()]
-    shared = set.intersection(*item_sets)
-    dropped_ragged = sorted(set().union(*item_sets) - shared)
-    restricted = {m: {i: v for i, v in row.items() if i in shared} for m, row in matrix.items()}
-    return restricted, dropped_ragged
-
-
 def irt_prune_report(records: dict[str, list[JudgmentRecord]]) -> dict[str, Any]:
     """Model-free IRT item screen — §12 Q1 (ATLAS): drop saturated / non-discriminating items.
 
@@ -568,10 +545,10 @@ def irt_prune_report(records: dict[str, list[JudgmentRecord]]) -> dict[str, Any]
     Graceful degradation (characterize-degradation): a per-item-salvaged run yields a RAGGED
     matrix (a model missing a few items), which the IRT screen cannot grade as-is. Rather than
     erroring the whole screen, restrict to the item subset shared across all models (via
-    :func:`_shared_item_matrix`) and REPORT the ragged drops — so a thinned panel still gets a
+    :func:`irt.shared_item_matrix`) and REPORT the ragged drops — so a thinned panel still gets a
     screen on its common items instead of an opaque error.
     """
-    matrix, ragged_dropped = _shared_item_matrix(_grade_matrix(records))
+    matrix, ragged_dropped = irt.shared_item_matrix(_grade_matrix(records))
     try:
         kept, dropped = irt.prune_items(matrix, min_variance=0.0, min_point_biserial=0.1)
     except Exception as exc:  # noqa: BLE001 — a genuinely-malformed (non-salvage) matrix
