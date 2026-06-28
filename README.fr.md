@@ -11,46 +11,46 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
 <p align="center"><b>A diagnostic adversarial game for frontier LLMs — a measurement instrument that happens to be fun.</b></p>
 
-Une session Claude (**Concepteur**) crée des énigmes ciblant de réels écarts de compétences actuellement observés. Une autre (**Résolveur**) tente de les résoudre. Un noyau régi par une politique assure la médiation, évalue les résultats par rapport à un oracle caché et organise un catalogue au moyen d’un cycle de vie `Lab → Arena → Regression`. Les énigmes sont basées sur des données empiriques — de réels problèmes GitHub, des publications universitaires, des défaillances observées sur le terrain — et non sur des éléments synthétiques.
+Une session Claude (**Concepteur**) crée des énigmes ciblant les lacunes de capacités réelles et actuellement observées. Une autre (**Résolveur**) tente de les résoudre. Un noyau régi par une politique assure la médiation, évalue les résultats par rapport à un oracle caché et organise un catalogue au moyen d’un cycle de vie `Lab → Arena → Regression`. Les énigmes sont basées sur des données empiriques — des problèmes réels signalés sur GitHub, des publications universitaires, des défaillances observées sur le terrain — et non sur des données synthétiques.
 
 ## Ce qui la rend différente
 
-- **Compétence, pas « triche ».** AI Crucible distingue l’*élégance* et la *nouveauté* (récompensées) de la *contournement de la réponse* (pénalisée). La pensée latérale est une compétence à mesurer, et non un défaut à sanctionner.
-- **L’instrument se mesure lui-même.** La formulation des invites est un élément essentiel qui est mesuré : le noyau exécute la même énigme avec des formulations « neutres », « autoréférentielles » ou basées sur les « classements sociaux », et signale son propre effet de formulation à titre d’élément diagnostique.
-- **Une limite de mesure hermétique.** La motivation et la mesure ne partagent jamais le même espace contextuel ; l’oracle caché est évalué en dehors du système par un modèle différent, avec le raisonnement de l’agent masqué. Le modèle ne peut pas manipuler ce qu’il ne perçoit pas.
-- **Fiabilité grâce à la cohérence.** `pass^k` (toutes les *k* tentatives indépendantes réussissent), intervalles de Wilson et panels d’évaluateurs inter-modèles — conçus pour signaler des distributions, et non des estimations ponctuelles.
-- **Un catalogue vivant et durable.** Les exécutions s’accumulent au fil des sessions dans un journal basé sur les événements et chaîné par hachage (la source de vérité) ; l’état du niveau est une projection dérivée. La promotion `Lab → Arena` tient compte de l’*abstention* — elle ne promeut que si le verdict inter-modèles est positif, et la *rétrograde vers le Concepteur* dans le cas contraire ; les énigmes saturées sont *rétrogradées vers « Regression », mais jamais supprimées* (un processus électronique anti-répétition), de sorte que le catalogue devient une chronologie d’évolution des compétences au fur et à mesure que la limite évolue.
-- **Le gain différentiel.** Pour chaque énigme, le taux de résolution de Claude par rapport au groupe inter-modèles permet de classer l’écart : *spécifique à Claude* (valeur la plus élevée) / *général pour les LLM* / *force de Claude* — sur la base d’un intervalle de différence de Newcombe avec une classe *inconclusive* de premier ordre, de sorte qu’une petite série de résultats nuls ne soit jamais interprétée à tort comme une découverte.
-- **Mesure tout type de modèle.** Les résolveurs utilisant le protocole natif d’appel de fonction (et pas seulement le protocole d’action textuelle) sont pris en compte en priorité : un modèle qui renvoie des appels d’outils au lieu d’actions textuelles résout les problèmes dans le même environnement contrôlé.
+- **Capacité, pas « triche ».** AI Crucible distingue l’*élégance* et la *nouveauté* (récompensées) de la *contournement de la réponse* (pénalisée). La pensée latérale est une capacité à mesurer, et non un défaut à punir.
+- **L’instrument se mesure lui-même.** Le cadrage des invites est un élément essentiel qui est mesuré : le noyau exécute la même énigme avec des cadrages « neutre » / « autoréférentiel » / « statut social », et rapporte son propre effet sur l’invite à titre d’élément de diagnostic.
+- **Une limite de mesure scellée.** La motivation et la mesure ne partagent jamais le même espace contextuel ; l’oracle caché est évalué en dehors du système par un modèle différent, avec les raisonnements de l’agent masqués. Le modèle ne peut pas manipuler ce qu’il ne perçoit pas.
+- **Fiabilité grâce à la cohérence.** `pass^k` (toutes les *k* tentatives indépendantes réussissent), intervalles de Wilson et panels d’évaluateurs inter-modèles — conçus pour rapporter des distributions, et non des estimations ponctuelles.
+- **Un catalogue vivant et durable.** Les exécutions s’accumulent au fil des sessions dans un journal basé sur les événements et chaîné par hachage (la source de vérité) ; l’état du niveau est une projection dérivée. La progression `Lab → Arena` tient compte de l’*abstention* — elle ne promeut que si le verdict inter-modèles est positif, et *passe au Concepteur* dans le cas contraire ; les énigmes saturées sont *rétrogradées à « Regression », mais jamais supprimées* (un processus électronique anti-répétition), de sorte que le catalogue devient une chronologie d’évolution des capacités au fur et à mesure que la limite évolue.
+- **Le gain différentiel.** Pour chaque énigme, le taux de résolution de Claude par rapport au groupe inter-modèles permet de classer l’écart : *spécifique à Claude* (valeur la plus élevée) / *général pour les LLM* / *force de Claude* — sur la base d’un intervalle de différence de Newcombe avec une classe *inconclusive* de premier ordre, de sorte qu’une petite série de résultats nuls ne soit jamais présentée comme une découverte.
+- **Mesure tout type de modèle.** Les résolveurs utilisant le protocole natif d’appel de fonction (et pas seulement le protocole d’action textuelle) sont considérés comme des éléments essentiels : un modèle qui renvoie des appels d’outils au lieu d’actions textuelles résout les problèmes par le biais du même environnement contrôlé.
 
 ## Modèle de menace (résumé)
 
-L’adversaire principal d’AI Crucible est le **modèle en cours de mesure**, qui peut tenter d’accéder à la clé de réponse ou de détecter et de manipuler l’évaluation. Il a accès : aux invites/configurations des énigmes, au répertoire de travail confiné du résolveur et aux appels d’API du fournisseur de modèles que l’opérateur configure. Il n’a pas accès : à l’oracle/à la clé de réponse (évaluée en dehors du système sur un hôte distinct auquel le résolveur ne peut pas accéder) ou aux éléments de motivation (« chrome » — classement/position, qui ne sont jamais injectés dans le contexte évalué). **Autorisations :** clés du fournisseur de modèles via des variables d’environnement au moment de l’exécution ; aucun secret intégré, aucune télémétrie, aucun appel sortant autonome. La divulgation complète, y compris les endroits où une limite est une *défense en profondeur* plutôt qu’une garantie absolue, se trouve dans **[SECURITY.md](SECURITY.md)**.
+L’adversaire principal d’AI Crucible est le **modèle en cours de mesure**, qui peut tenter d’accéder à la clé de réponse ou de détecter et de manipuler l’évaluation. Il *interagit avec* : les invites/configurations des énigmes, le répertoire de travail confiné du résolveur et les appels d’API du fournisseur de modèles que l’opérateur configure. Il n’*interagit pas avec* : l’oracle/la clé de réponse (évaluée en dehors du système sur un hôte distinct auquel le résolveur ne peut pas accéder) ou les éléments de « motivation » (rang/classement — jamais injectés dans le contexte évalué). **Autorisations** : clés du fournisseur de modèles via des variables d’environnement au moment de l’exécution ; aucun secret intégré, aucune télémétrie, aucun appel sortant autonome. La divulgation complète — y compris les endroits où une limite est une *défense en profondeur* plutôt qu’une garantie absolue — se trouve dans **[SECURITY.md](SECURITY.md)**.
 
 ## Architecture
 
-AI Crucible est une **couche de politique légère sur [Inspect AI](https://inspect.aisi.org.uk/)** (UK AISI), et non un système conçu à partir de zéro. Un seul objet `AttemptState` est transmis du Concepteur au Résolveur, puis au (Critique) et enfin au Juge, via **un seul point d’étranglement `generate`**, de sorte que chaque appel de modèle et d’outil soit observable.
+AI Crucible est une **couche de politique légère au-dessus de [Inspect AI](https://inspect.aisi.org.uk/)** (UK AISI), et non un ensemble d’outils créé à partir de zéro. Un seul objet `AttemptState` est transmis du Concepteur au Résolveur, puis au (Critique) et enfin au Juge, via **un seul point d’étranglement `generate`**, de sorte que chaque appel de modèle et d’outil soit observable.
 
 | Module | Responsabilité |
 | ------ | -------------- |
-| `puzzle_loader` | Charge un répertoire d’énigmes (`meta.json` / `prompt` / `setup_script`) dans l’état visible par le résolveur. **N’a jamais accès à l’oracle.** |
-| `sandbox` | Limite les canaux `exec` / `read_file` / `write_file` à un conteneur verrouillé et sans connexion réseau. |
-| `roles` | Les cinq emplacements de rôle (Concepteur / Résolveur / Critique / Juge / CohortSolver). Seul le résolveur a accès aux outils ; l’interface du critique est réservée et désactivée par défaut. |
-| `budget_governor` | Budgets d’appels d’outils et de temps chronologique par classe, affichés à l’agent, appliqués au niveau du noyau ; arrêt brutal en cas de boucles pathologiques. |
-| `oracle_scorer` | Évaluation hors bande : résolu **et** sans régression par rapport à l’oracle caché (modèle SWE-bench). |
+| `puzzle_loader` | Charge un répertoire d’énigmes (`meta.json` / `prompt` / `setup_script`) dans l’état visible par le résolveur. *N’interagit jamais avec l’oracle*. |
+| `sandbox` | Limite les canaux `exec` / `read_file` / `write_file` à un conteneur verrouillé et sans réseau. |
+| `roles` | Les cinq emplacements de rôle (Concepteur / Résolveur / Critique / Juge / CohortSolver). Seul le résolveur dispose d’outils ; l’interface du critique est réservée et désactivée par défaut. |
+| `budget_governor` | Budgets par classe pour les appels d’outils et le temps écoulé, affichés à l’agent, appliqués au niveau du noyau ; arrêt brutal en cas de boucles pathologiques. |
+| `oracle_scorer` | Évaluation hors système : résolu *et* sans régression par rapport à l’oracle caché (modèle SWE-bench). |
 | `judge_panel` | Panel inter-modèles d’évaluateurs de modèles + réducteur (PoLL) pour la validation de la nouveauté et la détection des contournements. |
-| `trace_writer` | Transcription par tentative dans le format `EvalLog` d’Inspect ; les gros blocs sont stockés par hachage. |
-| `observability` | Regroupements par tentative → par énigme → par modèle ; `pass^k` natif. |
-| `catalog` | Persistance durable basée sur les événements + le cycle de vie `Lab → Arena → Regression` (promotion tenant compte de l’abstention, saturation valide à tout moment) + la typologie différentielle. S’appuie sur le journal chaîné par hachage d’« attestation ». |
+| `trace_writer` | Transcription par tentative dans le format `EvalLog` d’Inspect ; les grands blocs sont stockés par hachage. |
+| `observability` | Regroupements par tentative → par énigme → par modèle ; `pass^k` natif. |
+| `catalog` | Persistance durable basée sur les événements + le cycle de vie `Lab → Arena → Regression` (progression tenant compte de l’abstention, saturation valide à tout moment) + la typologie différentielle. S’appuie sur le journal chaîné par hachage d’`attestation`. |
 | `attestation` | Preuve cryptographique (cosign + magasin d’événements) derrière une limite de sous-processus typée. |
 
-La limite hermétique fonctionne en trois niveaux : **Niveau 1** contexte évalué (conçu pour le déploiement, formulation neutre), **Niveau 2** formulation de l’engagement (vérifiée pour détecter toute contamination à chaque version), **Niveau 3** éléments d’interface (« chrome » — classement/tableau des scores, uniquement une interface utilisateur destinée aux humains, jamais dans un contexte dans lequel le modèle résout les problèmes). La justification complète de la conception, avec des citations, se trouve dans [`docs/research-grounding.md`](docs/research-grounding.md).
+La limite scellée s’exécute en trois niveaux : **Niveau 1** contexte évalué (adapté au déploiement, cadrage neutre), **Niveau 2** cadrage de l’engagement (vérifié pour détecter toute contamination à chaque version), **Niveau 3** éléments d’interface (rang/classement — uniquement une interface utilisateur destinée aux humains, jamais dans un contexte dans lequel le modèle résout des problèmes). La justification complète de la conception, avec les références, se trouve dans [`docs/research-grounding.md`](docs/research-grounding.md).
 
 ## Installation
 
@@ -63,7 +63,7 @@ ai-crucible --help
 npx @dogfood-lab/ai-crucible --help
 ```
 
-**Exécutez un cycle de diagnostic** : un résolveur tente de résoudre une énigme dans le bac à sable, et les résultats sont évalués en dehors du système par rapport à l’oracle hermétique, ce qui génère `pass^k` / Wilson.
+**Exécutez un cycle de diagnostic** : un résolveur tente de résoudre une énigme dans le bac à sable, et les résultats sont évalués en dehors du système par rapport à l’oracle scellé, ce qui permet d’obtenir la valeur `pass^k` / Wilson.
 
 ```bash
 # @family selects the adapter: no tag / @claude -> Claude (ANTHROPIC_API_KEY);
@@ -71,7 +71,7 @@ npx @dogfood-lab/ai-crucible --help
 ai-crucible run puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-Chaque exécution **s’accumule dans le catalogue durable**. Lisez-le et organisez-le, ou exécutez la sonde de sensibilisation à l’évaluation :
+Chaque exécution **s’accumule dans le catalogue durable**. Lisez-le et organisez-le, ou exécutez la sonde de détection de la sensibilisation à l’évaluation :
 
 ```bash
 ai-crucible catalog list                 # tiers + per-puzzle differential typology + health
@@ -82,7 +82,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Aperçu de la recherche (v0.3.x).** Le test alternatif ω du jury est toujours un *modèle circulaire de bootstrap avec un jury* : sa validation nécessite une série d’au moins **3 annotateurs humains indépendants** (le [test alternatif](https://arxiv.org/abs/2501.10970)), ce qu’un studio ne peut pas assurer avec un seul opérateur — cette étape est donc **suspendue en raison de contraintes structurelles, et non par négligence**. Les juges restent **provisoires**, le jury constitué **passe à un niveau supérieur pour atteindre un Claude Designer** lorsque le quorum n’est pas atteint, et l’outil révèle cela plutôt que de simuler une base humaine. Consultez la [fiche de résultats](SCORECARD.md) pour obtenir des résultats honnêtes et objectifs.
+**Outils d’instrumentation hors ligne** : aucun modèle, aucune GPU, s’exécute à partir d’un rapport d’exécution enregistré.
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+> **Aperçu de la recherche (v0.4.x).** Le test alternatif ω du jury est toujours un *modèle circulaire de bootstrap avec un jury* : sa validation nécessite une série d’au moins **3 évaluateurs humains indépendants** (le [test alternatif](https://arxiv.org/abs/2501.10970)), ce qu’un studio utilisant un seul évaluateur humain ne peut pas assurer, de sorte que cette étape est **suspendue en raison d’une contrainte structurelle, et non par négligence**. Les juges restent **provisoires**, le jury constitué **passe à un Claude Designer** lorsque le quorum n’est pas atteint, et l’outil révèle cela plutôt que de simuler une évaluation humaine. Consultez la [fiche de notation](SCORECARD.md) pour obtenir les résultats honnêtes et objectifs.
 
 ## Démarrage rapide (à partir du code source)
 
@@ -102,16 +113,22 @@ uv run ruff check .
 bash verify.sh
 ```
 
+## Évaluation inter-familles
+
+La première série d’évaluations inter-familles, dont les résultats ont été **publiés**, est disponible dans [`eval/RESULTS.md`](eval/RESULTS.md) (avec le fichier `eval/panel.json` et le rapport de caractérisation). Sept familles distinctes — deux locales (gemma4, granite4.1) et cinq points d’accès OpenRouter définis (deepseek, cohere, meta-llama, qwen, nvidia) — ont été évaluées sur 93 paires de calibration avec k=3 : 1 395 appels payés sans **aucune interruption due à une limite de débit**.
+
+**Le résultat honnête :** le groupe accepte désormais **3 familles distinctes** (contre seulement 2 auparavant), et un nouveau jury inter-familles est mis en place — mais le jury *indépendant* constitué ne compte toujours que **2 membres** (le troisième est supprimé pour éviter une redondance d’erreurs, ρ≈1.0), ce qui est **inférieur au quorum**, de sorte que le jury **passe à un Claude Designer** plutôt que de prendre une décision automatiquement. Le facteur limitant s’est avéré être **l’axe du test alternatif ω non validé, et non la qualité des juges** — quatre juges performants (précision de 0,91 à 0,96) sont évalués *uniquement* sur le modèle circulaire-jury ω. « 3 acceptés » est une véritable avancée ; ce n’est **pas** « ω résolu ». ω reste suspendu, les membres du jury restent provisoires, et la validation finale est toujours reportée — mais cela est révélé, et non simulé.
+
 ## Documentation
 
 - **[Manuel](https://dogfood-lab.github.io/ai-crucible/)** — guides, architecture et documentation de référence.
 - [`docs/research-grounding.md`](docs/research-grounding.md) — justification de la conception, avec références.
-- [`docs/gameplan.md`](docs/gameplan.md) — feuille de route et questions en suspens.
+- [`docs/gameplan.md`](docs/gameplan.md) — feuille de route et questions ouvertes.
 - [`SECURITY.md`](SECURITY.md) — modèle de menace + divulgation honnête des risques résiduels.
 
 ## Licence
 
-[MIT](LICENSE). Public et version pré-1.0 — consultez le [JOURNAL DES MODIFICATIONS](CHANGELOG.md) pour connaître l’état de la version.
+[MIT](LICENSE). Public et pré-1.0 — consultez le [JOURNAL DES MODIFICATIONS](CHANGELOG.md) pour connaître l’état de la version.
 
 ---
 

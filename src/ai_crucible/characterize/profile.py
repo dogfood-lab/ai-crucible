@@ -109,6 +109,25 @@ from ai_crucible.scoring.stats import wilson_interval
 __all__ = ["SeatGates", "build_profile", "perturbation_audit"]
 
 
+def _accuracy_wilson(accuracy: float, n_eff: float, conf: float = 0.95) -> tuple[float, float]:
+    """Wilson CI on a difficulty-weighted accuracy at the EFFECTIVE sample size (§12 fix).
+
+    The difficulty-weighted accuracy is a weighted proportion, NOT ``successes / n_items``;
+    intervalling it at ``n_items`` fabricated a binomial count and understated uncertainty —
+    a coin-flip judge whose few HEAVY items happened to be right cleared the REJECT floor
+    (characterize eval-integrity finding). The honest interval is Wilson at the Kish
+    effective sample size ``n_eff = (Σw)² / Σw²``
+    (:func:`~ai_crucible.characterize.metrics.effective_sample_size`): the design-effect of
+    the weight concentration widens the CI, and on a uniform-weight set ``n_eff == n_items``
+    so this reduces to the plain per-item Wilson (a no-op on unweighted sets). The effective
+    success count is rounded and clamped to ``[0, n]`` so :func:`wilson_interval`'s
+    integer-count contract holds.
+    """
+    n = max(1, round(n_eff))
+    successes = min(n, max(0, round(accuracy * n)))
+    return wilson_interval(successes, n, conf=conf)
+
+
 @dataclass(frozen=True, slots=True)
 class SeatGates:
     """The §12-corrected seat-gate thresholds — frozen so a profile run is replayable.
@@ -178,6 +197,7 @@ class _Metrics:
     ece: float | None        # None = not measured (§12)
     max_bias: float
     n_items: int
+    n_eff: float             # Kish effective sample size for the accuracy Wilson CI (§12)
 
 
 def _kappa_floor(human_human_kappa: float, n_items: int, gates: SeatGates) -> float:
@@ -223,15 +243,16 @@ def _score_ci(m: _Metrics, gates: SeatGates) -> tuple[float, float, float]:
     """``(score, score_lo, score_hi)`` — the §12 selective-decision interval.
 
     The dominant source of sampling uncertainty in the score is the accuracy term, so we
-    build a Wilson 95% interval on the (difficulty-weighted) accuracy over ``n_items`` and
-    push its bounds through the **monotone** :func:`~ai_crucible.characterize.metrics.quality_score`
+    build a Wilson 95% interval on the (difficulty-weighted) accuracy at the Kish EFFECTIVE
+    sample size ``n_eff`` (:func:`_accuracy_wilson` — a weighted proportion is not a binomial
+    count over ``n_items``) and push its bounds through the **monotone**
+    :func:`~ai_crucible.characterize.metrics.quality_score`
     (the other components are deterministic given the records). Because the combiner is
     non-decreasing in accuracy, the accuracy CI maps to a score CI ordered the same way.
     This is the small-N-admissible interval (Wilson, not Wald — §1) the rest of ai_crucible
     uses, reused rather than re-derived.
     """
-    successes = round(m.accuracy * m.n_items)
-    acc_lo, acc_hi = wilson_interval(successes, max(1, m.n_items), conf=0.95)
+    acc_lo, acc_hi = _accuracy_wilson(m.accuracy, m.n_eff, conf=0.95)
     score = _score_with_accuracy(m.accuracy, m, gates)
     score_lo = _score_with_accuracy(acc_lo, m, gates)
     score_hi = _score_with_accuracy(acc_hi, m, gates)
@@ -320,9 +341,11 @@ def _measure(
     n_items = len({r.item_id for r in records})
 
     accuracy = M.difficulty_weighted_accuracy(records)
-    # Wilson lower on the difficulty-weighted accuracy (successes recovered as acc × n).
-    successes = round(accuracy * n_items)
-    acc_lower, _ = wilson_interval(successes, max(1, n_items), conf=0.95)
+    # Wilson lower on the difficulty-weighted accuracy at the Kish EFFECTIVE sample size —
+    # a weighted proportion is not successes/n_items, so n_eff = (Σw)²/Σw² is the honest N
+    # (== n_items when weights are uniform). See _accuracy_wilson (the §12 fabricated-count fix).
+    n_eff = M.effective_sample_size(records)
+    acc_lower, _ = _accuracy_wilson(accuracy, n_eff)
 
     r, kappa = M.agreement(records)
     kappa_z = M.kappa_zscore(kappa, human_human_kappa, n_items)
@@ -363,6 +386,7 @@ def _measure(
         ece=ece,
         max_bias=max_bias,
         n_items=n_items,
+        n_eff=n_eff,
     )
 
 
@@ -688,8 +712,7 @@ def perturbation_audit(
 
     # Per-threshold SE-sized step. Accuracy/score-scale knobs use the Wilson half-width of
     # the accuracy CI; the κ-floor margin uses the baseline κ SE; the rest a small delta.
-    successes = round(m.accuracy * m.n_items)
-    acc_lo, acc_hi = wilson_interval(successes, max(1, m.n_items), conf=0.95)
+    acc_lo, acc_hi = _accuracy_wilson(m.accuracy, m.n_eff, conf=0.95)
     acc_se = max(1e-3, (acc_hi - acc_lo) / 2.0)
     p0 = human_human_kappa
     kappa_se = max(1e-3, (p0 * (1.0 - p0) / max(1, m.n_items)) ** 0.5)
@@ -699,15 +722,18 @@ def perturbation_audit(
         else 1.96 * kappa_se
     )
 
-    # (threshold name, a function applying a signed step to a copy of the gates).
+    # (threshold name → SE-sized step). ONLY thresholds the §12 decision actually reads are
+    # perturbed: jittering a knob _decide_from_metrics never consults is a guaranteed no-op
+    # that pads the denominator and deflates the flip_rate andon signal (characterize:
+    # `consistency_floor`/`bias_ceiling` are scored into quality_score as MEASURED values, not
+    # read as gate thresholds — see _decide_from_metrics — so they are excluded here so the
+    # flip-rate denominator equals the decision-relevant-threshold set).
     steps: dict[str, float] = {
         "accuracy_floor": acc_se,
         "agreement_r": acc_se,
         "kappa_floor_margin": kappa_se,
         "quality_floor": acc_se,
         "alt_test_omega": acc_se,
-        "consistency_floor": acc_se,
-        "bias_ceiling": acc_se,
         "ece_soft_ceiling": acc_se,
     }
 

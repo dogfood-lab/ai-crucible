@@ -39,7 +39,9 @@ import pytest
 from ai_crucible.budget import BudgetExceeded, BudgetGovernor
 from ai_crucible.roles import Solver
 from ai_crucible.solver_loop import (
+    _EXEC,
     DEFAULT_TOOL_INSTRUCTION,
+    _execute,
     build_solver_generate,
 )
 from ai_crucible.types import AttemptState, Budget, RoleName, TerminatedBy
@@ -409,6 +411,40 @@ def test_over_budget_through_real_solver_act_stamps_terminated_by() -> None:
     assert result.error is not None and "budget" in result.error.lower()
     # An error trace event was recorded by Solver.act (the andon boundary stamp).
     assert any(e.kind == "error" for e in result.events)
+
+
+# --------------------------------------------------------------------------- #
+# Scenario 5 — a sandbox per-call ANDON (timeout) must HALT, not be swallowed
+# --------------------------------------------------------------------------- #
+
+
+def test_execute_propagates_budget_exceeded_from_a_tool_call() -> None:
+    """A per-call ANDON — the sandbox adapter's wall-clock kill raises BudgetExceeded(TIME)
+    from INSIDE ``tools.exec`` — must PROPAGATE out of ``_execute`` (so Solver.act stamps
+    terminated_by), NOT be swallowed into a benign 'ERROR: ...' observation. A non-budget tool
+    error (FileNotFoundError) is STILL surfaced as an observation — the discrimination the fix
+    preserves."""
+
+    class _TimingOutTools:
+        async def exec(self, command: str) -> str:
+            raise BudgetExceeded(TerminatedBy.TIME, "sandbox per-call wall-clock kill")
+
+    class _FailingTools:
+        async def exec(self, command: str) -> str:
+            raise FileNotFoundError("no such file")
+
+    class _FakeSolver:
+        def __init__(self, tools: object) -> None:
+            self.tools = tools
+
+    # The ANDON breach propagates (halt), carrying TIME.
+    with pytest.raises(BudgetExceeded) as excinfo:
+        anyio.run(_execute, _FakeSolver(_TimingOutTools()), _EXEC, {"command": "sleep 999"})
+    assert excinfo.value.terminated_by is TerminatedBy.TIME
+
+    # A non-budget tool fault is still an observation the model can react to (not raised).
+    out = anyio.run(_execute, _FakeSolver(_FailingTools()), _EXEC, {"command": "cat nope"})
+    assert out.startswith("ERROR: FileNotFoundError")
 
 
 # --------------------------------------------------------------------------- #

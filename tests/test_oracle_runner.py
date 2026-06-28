@@ -171,6 +171,29 @@ def test_looping_trajectory_fires_redundant_tool_calls_via_tcrr(seed_meta: Puzzl
     assert outcome.tool_calls_used == 4
 
 
+def test_looping_not_injected_when_puzzle_does_not_declare_redundant(
+    seed_meta: PuzzleMeta,
+) -> None:
+    """The runner injects its universal TCRR penalty ONLY when the puzzle DECLARES it. A puzzle
+    that does not declare ``redundant_tool_calls`` (e.g. the calib anchors) must NOT have it
+    injected on a looping trajectory — otherwise the §8.3 unknown-penalty fail-closed would close
+    the gate on a name the puzzle never opted into (a false non-solve). Same looping trace as
+    above, only the declaration removed → the penalty is not injected."""
+    no_redundant = seed_meta.model_copy(
+        update={
+            "penalties": [p for p in seed_meta.penalties if p.name != "redundant_tool_calls"]
+        }
+    )
+    events = [_tool_event(i, "read_file", {"path": "config/limits.py"}) for i in range(4)]
+    attempt = _attempt(events=events, output="7")
+    runner = make_oracle_runner(SEED_ROOT)
+
+    outcome = _run(runner, attempt, no_redundant)
+
+    assert "redundant_tool_calls" not in outcome.triggered_penalties
+    assert outcome.solved is True
+
+
 def test_clean_trajectory_below_tcrr_has_no_redundancy_penalty(seed_meta: PuzzleMeta) -> None:
     """Distinct, non-looping reads stay under the TCRR threshold → no
     ``redundant_tool_calls`` (the negative case proving TCRR discriminates)."""

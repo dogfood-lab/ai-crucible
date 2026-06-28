@@ -1,0 +1,53 @@
+[
+  {
+    "id": "pair-21-modulo",
+    "category": "known_diagnostic",
+    "construct": "judge a modulo result",
+    "confound_controlled": "remainder, not quotient",
+    "prompt": "You are an impartial judge. For the question below, exactly one of the two candidate answers is correct and the other is subtly wrong. Decide which is correct.\n\nQuestion: What is 17 mod 5?\nCandidate A: 3\nCandidate B: 2\n\nWhich candidate is correct? Reply with exactly one letter: A or B.",
+    "gold": "B",
+    "difficulty": 0.55,
+    "expected_pass": {
+      "strong": true,
+      "weak": false
+    },
+    "metadata": {
+      "flaw_family": "near_miss_remainder",
+      "correct_side": "B"
+    }
+  },
+  {
+    "id": "prec-06-comparison-below-bitwise",
+    "category": "known_diagnostic",
+    "construct": "judge bitwise-binds-tighter-than-comparison",
+    "confound_controlled": "bind | before ==, not == before |",
+    "prompt": "You are an impartial judge. For the question below, exactly one of the two candidate answers is correct and the other is subtly wrong. Decide which is correct.\n\nQuestion: In Python, what does the expression 2 | 1 == 1 evaluate to?\nCandidate A: 3\nCandidate B: False\n\nWhich candidate is correct? Reply with exactly one letter: A or B.",
+    "gold": "B",
+    "difficulty": 0.82,
+    "expected_pass": {
+      "strong": true,
+      "weak": false
+    },
+    "metadata": {
+      "flaw_family": "comparison_below_bitwise",
+      "correct_side": "B"
+    }
+  },
+  {
+    "id": "prec-07-comparison-chaining",
+    "category": "known_diagnostic",
+    "construct": "judge comparison chaining",
+    "confound_controlled": "chain as conjunction, not left-associative re-comparison",
+    "prompt": "You are an impartial judge. For the question below, exactly one of the two candidate answers is correct and the other is subtly wrong. Decide which is correct.\n\nQuestion: In Python, what does the expression 1 < 3 == 3 evaluate to?\nCandidate A: False\nCandidate B: True\n\nWhich candidate is correct? Reply with exactly one letter: A or B.",
+    "gold": "B",
+    "difficulty": 0.76,
+    "expected_pass": {
+      "strong": true,
+      "weak": false
+    },
+    "metadata": {
+      "flaw_family": "comparison_chain_not_left_assoc",
+      "correct_side": "B"
+    }
+  }
+]

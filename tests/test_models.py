@@ -1018,6 +1018,25 @@ def test_claude_retries_5xx_status_error(
     assert client.calls == 2
 
 
+def test_claude_retries_429_rate_limit(
+    attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 429 (anthropic.RateLimitError is an APIStatusError with status 429) is the EXPECTED
+    transient under sustained load — it must be absorbed by the bounded backoff, not abort the
+    run (the rate-limit-as-fatal gap, Claude side; mirrors the OpenRouter fix)."""
+    anthropic = _install_fake_anthropic(monkeypatch)
+    client = FlakyClaudeClient(
+        anthropic.APIStatusError("rate limited", status_code=429), fail_times=2
+    )
+    model = ClaudeModel(
+        "claude-opus-4-8", client=client, max_retries=2, sleep=_no_sleep
+    )
+
+    out = asyncio.run(model.generate(attempt))
+    assert out == "claude-ok"
+    assert client.calls == 3  # 1 initial + 2 retries, then success
+
+
 def test_claude_does_not_retry_4xx(
     attempt: AttemptState, monkeypatch: pytest.MonkeyPatch
 ) -> None:

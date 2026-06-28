@@ -213,6 +213,29 @@ def test_irt_prune_drops_saturated_item() -> None:
     assert rep["n_items"] == 4
 
 
+def test_irt_prune_degrades_to_shared_subset_on_ragged_matrix() -> None:
+    """A per-item-salvaged run yields a RAGGED matrix (a model missing an item). The IRT screen
+    must DEGRADE to the item subset shared across all models — reporting the ragged drop — rather
+    than collapse the whole screen to an error (the same graceful degradation
+    aggregate.pairwise_error_correlation already applies on the SAME ragged input)."""
+    records = {
+        "mA": [_rec("i_sat", "mA", correct=True), _rec("d1", "mA", correct=True),
+               _rec("d2", "mA", correct=True), _rec("d3", "mA", correct=True)],
+        "mB": [_rec("i_sat", "mB", correct=True), _rec("d1", "mB", correct=True),
+               _rec("d2", "mB", correct=False), _rec("d3", "mB", correct=False)],
+        # mC dropped d3 to per-item salvage → a ragged row (3 items, not 4).
+        "mC": [_rec("i_sat", "mC", correct=True), _rec("d1", "mC", correct=False),
+               _rec("d2", "mC", correct=False)],
+    }
+    rep = irt_prune_report(records)
+    assert "error" not in rep                 # degraded, not collapsed to an error
+    assert rep["ragged_dropped"] == ["d3"]
+    assert rep["ragged_dropped_count"] == 1
+    assert rep["n_items"] == 3                 # screened on the 3 items shared across all models
+    assert "i_sat" in rep["dropped"]           # the saturated shared item still drops
+    assert "DEGRADED" in rep["note"]
+
+
 def test_jury_needs_two_peers() -> None:
     recs_a = [_rec("i1", "a", correct=True)]
     recs_b = [_rec("i1", "b", correct=True)]

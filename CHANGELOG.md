@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-06-28
+
+OpenRouter cross-family quorum swarm: the first **published** cross-family judge-admission
+run + two eval-integrity health passes (1 CRITICAL + 4 HIGH, every fix test-first and
+cross-family verified) + an offline human-label intake gate + the harder-set curation
+pipeline (study-swarm Phase A). Suite **795 → 854** tests; ruff clean; CI green on Python
+3.11 / 3.12 / 3.13. The run admitted **3 disjoint families** to the judge pool (up from 2
+local-only) and seated a genuinely new cross-family judge — but the composed panel still
+**escalates** (sub-quorum + error-redundancy), and the alt-test ω stays a circular
+model-jury bootstrap (no ≥3 independent human annotators a one-human studio can staff). So
+seats stay provisional, graduation escalates to the Designer, and the version stays **0.x**:
+"3 admit" ≠ "ω solved". Disclosed, not faked.
 
 ### Added
 - **OpenRouter cross-family seat** — a new `OpenRouterModel` adapter
@@ -28,6 +39,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     mislabel that would corrupt the cross-family attribution) without a brittle vendor→family table
     or a refusal. The operator's `@family` stays the authoritative axis — consistent with the
     trusting Ollama path.
+
+- **`eval/RESULTS.md` — published cross-family judge-admission runs.** The first cross-family
+  OpenRouter quorum run (2 local + 5 pinned-OpenRouter seats, 7 disjoint families, 93 pairs, k=3)
+  with its committed `eval/panel.json` + `eval/cross-family-quorum-2026-06-28.json`. Result: 3 disjoint
+  families now clear the 6-metric admission bar (up from 2), but the composed panel still escalates
+  (sub-quorum, error-redundancy) and ω stays on ice — seats provisional, disclosed not faked.
+
+- **`ai-crucible labels validate` — offline human-label intake gate (Fork C, §12.2).** A thin new
+  subcommand that loads the calibration items and runs `load_human_labels` in **check-only mode** —
+  reporting annotator count, item count, ε, IAA Krippendorff α, DISPUTED drops, and the under-power
+  note — with **no model seated and no GPU**, so an operator can validate a candidate
+  `human_labels.json` the day independent annotators deliver one, long before a full
+  `characterize --human-labels` run. Calls the same loader the run uses (a file that validates here
+  is one the run accepts); human chrome → STDERR, machine JSON → STDOUT; structured
+  `[CODE] msg (hint:)` errors on a malformed file (exit 1), exit 2 on a bad invocation, exit 0 with
+  `under_powered: true` for a valid-but-thin file. Ships a copy-paste starting point at
+  `calibration/human_labels.example.json` (3 expert annotators over 32 bundled items, clearing the
+  ≥3-annotator / ≥30-item floors, with one `unsure` and one disputed split) and a handbook page
+  ("Retiring the circular omega (Fork C)"). This is intake plumbing only — it fabricates no labels,
+  and ω stays the circular model-jury bootstrap until ≥3 *independent* humans exist.
+
+- **`ai-crucible calibration curate` + `calibration/curate.py` — the harder-set curation pipeline
+  (study-swarm Phase A).** Research-grounded (design in `swarm/openrouter-quorum/STUDY-SWARM-harder-
+  calibration-set.md`) response to the run's #1 lever: only 11/93 admission items discriminate among
+  strong judges. The pipeline has two steps. (1) **Discrimination screen** (AFLite, Le Bras 2020;
+  Fisher-info selection, Zhou 2025): given a candidate pool + a characterization run's persisted
+  `grade_matrix`, keep the items strong judges DISAGREE on and drop the saturated ones every judge
+  passes — moving the §12 IRT saturation screen UPSTREAM into a forward curation step (reuses
+  `irt.prune_items`). (2) **Ambiguity gate** (`ambiguity_gate`; GPQA difficulty-vs-ambiguity, Rein
+  2023; dual verification, JudgeBench 2024): a harder item must keep a DEFENSIBLE key — given ≥2
+  independent verifier verdicts, verifier disagreement = AMBIGUOUS (omit), verifiers-agree-but-differ-
+  from-gold = MISLABELED (omit), agree-with-gold = DEFENSIBLE (keep). The crown-jewel constraint: a
+  harder set must never become an ambiguous set. The offline CLI runs the discrimination screen and,
+  with `--out`, writes the kept subset as a calibration JSON directly re-usable as `characterize
+  --items`; the ambiguity gate ships as a tested library function (it needs live verifier verdicts).
+  The characterization report now persists the `grade_matrix` so curation + subset re-analysis run
+  offline from a committed report. NO model seated, NO GPU. (Phase A is the pipeline; Phase B feeds it
+  new-construct content — the genuinely-harder items.)
+
+### Fixed
+- **Eval-integrity: the answer-key bait penalty was evadable (CRITICAL).** The grading host detected
+  a sealed-answer-key touch only when the Solver read it via an allowlisted command
+  (`grep`/`cat`/…); a read via any other command (`od`/`xxd`/`strings`/`python3 -c`/`cp`/`dd`) touched
+  the bait without registering, so a fabricated-but-correct answer could pass the §8.3 gate CLEAN. The
+  runner now emits a deny-by-default `touched_paths` set (path operands of EVERY exec) that the
+  bait/oracle guard keys on, while grounded-read stays allowlist-gated. Closed across 6 evasion vectors
+  end-to-end and cross-family verified. (The residual — shell-glob / computed-path reads — is
+  documented and deferred to a host-side filesystem access tripwire.)
+- **Judge admission: the Wilson interval was fed a fabricated count (HIGH).** The seat gate built its
+  accuracy confidence interval from `round(difficulty_weighted_accuracy × n_items)` — a fictional
+  binomial count that understated uncertainty (a chance-level judge whose few heavy items happened to
+  be right could clear the REJECT floor). It now uses the Kish effective sample size
+  `n_eff = (Σw)²/Σw²` (a no-op on uniformly-weighted sets), restoring a sound small-N admissibility
+  bound.
+- **npm launcher shipped a stale version (HIGH).** `npx @dogfood-lab/ai-crucible` derived its release
+  asset names from a hardcoded `0.2.0` in the bin, so the published 0.3.0 package fetched 0.2.0
+  binaries; the launcher now derives version + tag from `package.json` at runtime (cannot drift).
+- **Rate-limit (429) was treated as fatal in the model adapters.** The OpenRouter and Claude transient
+  classifiers retried 5xx but not 429, so a momentary rate-limit burst aborted a long panel/solver run
+  instead of being absorbed by the bounded backoff. 429 (and Anthropic 529 Overloaded) is now retried.
+- **The sealed-boundary chrome scan was not field-agnostic.** `_chrome_tokens` hard-coded four fields,
+  so a future Tier-3 chrome field could leak into scored context while the guard reported clean; it now
+  walks `dataclasses.fields`, mirroring the already-field-agnostic message scan.
+- **A sandbox per-call timeout was swallowed by the solver loop.** A `BudgetExceeded(TIME)` raised by
+  the sandbox adapter inside `_execute` was caught by the broad observation handler; it now propagates
+  so a runaway command halts the attempt with `terminated_by=TIME`.
+- **perturbation_audit jittered two thresholds the decision never reads** (`consistency_floor`,
+  `bias_ceiling`), padding the flip-rate denominator and deflating the gate-fragility andon signal; the
+  perturbed set now equals the decision-relevant threshold set.
+- **Eval-integrity: a genuine grounded read via a modern reader scored as a fabricated non-solve.**
+  The grounded-read signal counted only an allowlisted reader (`grep`/`cat`/…), so reading the source
+  via `rg`/`bat`/`nl`/`python3 -c` (ripgrep is Claude Code's own default) fired a false
+  `skip_grounded_read` and closed the gate on a correct answer — biasing cross-model comparison and able
+  to corrupt the calibration anchors. The reader allowlist now covers the common content-readers
+  (non-reading commands like `cp`/`mv` stay excluded so they can't falsely ground).
+- **Eval-integrity: an unknown (misspelled) triggered penalty name never closed the gate.** A penalty a
+  puzzle's oracle fires but `meta.json` doesn't declare was surfaced-but-not-scored, so a typo'd CRITICAL
+  penalty (`answer_key_fetchh`) silently skipped the critical veto and an adversarial bypass scored
+  clean. An unresolved triggered name now fails the gate closed (`unknown_penalty_fired`); the runner's
+  universal redundancy penalty is injected only when the puzzle declares it.
+- **A positive `Penalty.weight` would invert a penalty into a bonus.** `Penalty.weight` is now
+  constrained `≤ 0` at the schema boundary, rejected at puzzle load instead of silently skipping the
+  penalty-adjusted floor close.
+- **A gpt-oss judge served via OpenRouter could mis-grade on leaked Harmony tokens.** The OpenRouter
+  adapter now routes completions through the shared `_normalize_harmony` (identity pass-through for
+  clean responses), collapsing an OpenAI Harmony chat-template leak (`<|channel|>analysis<|message|>…`)
+  to its final-channel answer before the judge/solver parser sees it — the same defense the Ollama
+  adapter already applies.
+- **A salvaged characterization run collapsed the IRT calibration screen to an error.** Per-item
+  salvage can leave one model missing a few items (a ragged matrix); the IRT item-prune screen now
+  degrades to the item subset shared across all models and reports the dropped count, instead of
+  erroring the whole screen (matching the per-pair degradation the panel-correlation screen already had).
+- **`calibration curate` crashed on a ragged grade-matrix (caught by the live-ρ demo).** The forward
+  discrimination screen (`select_discriminators`) called `irt.prune_items` directly, so a single
+  per-item salvage in the source run (a cloud-judge timeout) raised `IRT_RAGGED_MATRIX` and aborted
+  the whole curation — even though the post-hoc run screen already degrades the same input. Both paths
+  now share a new public `irt.shared_item_matrix` helper: curate degrades to the shared item subset
+  and REPORTS the ragged drops (`dropped_ragged`, surfaced in the CLI JSON) instead of crashing.
+  Surfaced + fixed test-first during the 2026-06-28 live-ρ-curation demonstration (see
+  `eval/RESULTS.md`).
 
 ## [0.3.0] — 2026-06-21
 

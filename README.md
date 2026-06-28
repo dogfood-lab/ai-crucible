@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -83,7 +83,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Research preview (v0.3.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap*: validating it needs a round of **≥3 independent human annotators** (the [alt-test](https://arxiv.org/abs/2501.10970)), which a single-human studio cannot staff — so that round is **on ice by structural constraint, not neglect**. Seated judges stay **provisional**, the composed panel **escalates to a Claude Designer** below quorum, and the instrument discloses this rather than faking human grounding. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
+**Offline instrument-quality tooling** — no model, no GPU, runs from a committed run report:
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+> **Research preview (v0.4.x).** The judge panel's alt-test ω is still a *circular model-jury bootstrap*: validating it needs a round of **≥3 independent human annotators** (the [alt-test](https://arxiv.org/abs/2501.10970)), which a single-human studio cannot staff — so that round is **on ice by structural constraint, not neglect**. Seated judges stay **provisional**, the composed panel **escalates to a Claude Designer** below quorum, and the instrument discloses this rather than faking human grounding. See the [scorecard](SCORECARD.md) for the honest, non-cosmetic gate results.
 
 ## Quick start (from source)
 
@@ -102,6 +113,12 @@ uv run ruff check .
 # One command: lint + tests + build + smoke
 bash verify.sh
 ```
+
+## Cross-family evaluation
+
+The first **published** cross-family judge-admission run lives in [`eval/RESULTS.md`](eval/RESULTS.md) (with the committed `eval/panel.json` and characterization report). Seven disjoint families — two local (gemma4, granite4.1) and five pinned OpenRouter endpoints (deepseek, cohere, meta-llama, qwen, nvidia) — were screened over 93 calibration pairs at k=3: 1,395 paid calls with **zero rate-limit drops**.
+
+**The honest result:** the pool now **admits 3 disjoint families** (up from 2 local-only), and a genuinely new cross-family judge seats cleanly — but the composed *independent* panel is still **2 seats** (the third is dropped for error-redundancy, ρ≈1.0), which is **sub-quorum**, so the panel **escalates to the Claude Designer** rather than auto-deciding. The bottleneck turned out to be the **un-validated alt-test ω axis, not judge quality** — four strong judges (acc 0.91–0.96) are screened *solely* on the circular model-jury ω. "3 admit" is a real step; it is **not** "ω solved." ω stays on ice, seats stay provisional, graduation still defers — disclosed, not faked.
 
 ## Documentation
 

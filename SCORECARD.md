@@ -1,10 +1,10 @@
 # Scorecard
 
 > Pre/post assessment for the full treatment (2026-06-01), refreshed for the v0.3.0
-> dogfood swarm (2026-06-21).
+> dogfood swarm (2026-06-21) and the v0.4.0 OpenRouter-quorum swarm (2026-06-28).
 
 **Repo:** dogfood-lab/ai-crucible
-**Date:** 2026-06-01 (treatment) · 2026-06-21 (v0.3.0 refresh)
+**Date:** 2026-06-01 (treatment) · 2026-06-21 (v0.3.0 refresh) · 2026-06-28 (v0.4.0 refresh)
 **Type tags:** `[all]` `[pypi]` `[cli]` `[npm]` (Python library/framework that also ships a thin `ai-crucible` CLI + an `@dogfood-lab/ai-crucible` npm launcher — corrected 2026-06-21; not MCP/desktop/vsix)
 
 ## Pre-Remediation Assessment
@@ -62,3 +62,22 @@ now satisfied by the v0.3.0 release.
 bootstrap (no ≥3 independent human annotators a one-human studio can staff), so seats are
 provisional and graduation escalates to the Designer. Forcing v1.0.0 would overclaim a
 pre-Phase-2 instrument; pre-1.0 is the honest version. This is disclosed, not faked.
+
+## v0.4.0 OpenRouter-quorum swarm refresh (2026-06-28)
+
+`npx @mcptoolshop/shipcheck audit` → **100%** (21/21 checked, 0 unchecked, 14 SKIP). Suite
+**795 → 854** tests, **94%** coverage, ruff clean; CI green on Python 3.11 / 3.12 / **3.13** —
+3.13 was added to the matrix this swarm (verified 854-green locally) so every Python version
+advertised in the PyPI classifiers is exercised, not assumed. This release ships the first
+**published** cross-family judge-admission run (`eval/RESULTS.md`: 2 local + 5 pinned-OpenRouter
+seats, 7 disjoint families, 93 pairs, k=3, 1,395 paid calls, **zero** rate-limit drops), two
+eval-integrity health passes (1 CRITICAL bait-evasion close + 4 HIGH, every fix test-first and
+cross-family verified), the offline `ai-crucible labels validate` intake gate, and the
+`ai-crucible calibration curate` harder-set pipeline (study-swarm Phase A). D's
+"version-matches-tag" is satisfied by the v0.4.0 release.
+
+**Why still v0.x:** the cross-family run admitted 3 disjoint families (up from 2 local-only), but
+the composed panel still escalates (sub-quorum + ρ≈1.0 error-redundancy), and the alt-test ω
+remains a circular model-jury bootstrap (no ≥3 independent human annotators). "3 admit" ≠ "ω
+solved" — seats stay provisional, graduation defers, pre-1.0 stays the honest version. Disclosed,
+not faked.

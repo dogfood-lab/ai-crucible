@@ -1,0 +1,296 @@
+{
+  "n_items": 3,
+  "k": 3,
+  "item_set": "harder.json",
+  "attempted_panel": [
+    "qwen3-coder:480b-cloud",
+    "gpt-oss:120b-cloud",
+    "gemini-3-flash-preview:cloud"
+  ],
+  "failed_models": [],
+  "degraded": false,
+  "alt_test_reference": "model-jury-bootstrap",
+  "alt_test_caveat": "alt-test \u03c9 is a MODEL-JURY BOOTSTRAP (a documented director decision). The reference 'annotators' are the other panel models, drawn from the SAME population being seated, so \u03c9 is CIRCULAR. A valid alt-test needs >=3 HUMAN annotators on >=30 items (Calderon, Reichart & Dror 2025, arXiv:2501.10970). Here \u03c9 functions as an OUTLIER DETECTOR (a judge that agrees with its peers no worse than peers agree with each other), NOT a substitution guarantee. Seat decisions are PROVISIONAL until human labels exist (\u00a712 Q3).",
+  "kappa_baseline": {
+    "value": 0.8,
+    "provisional": true,
+    "alt_test_reference": "model-jury-bootstrap",
+    "source": "hardcoded default \u2014 NOT human-estimated; the \u03ba one-sided floor and \u03ba-z gates (which can SEAT or REJECT a judge) are PROVISIONAL until --human-labels supplies a measured human\u2013human Krippendorff \u03b1 (\u00a712 Q3)"
+  },
+  "human_alt_test": null,
+  "profiles": {
+    "qwen3-coder:480b-cloud": {
+      "model_id": "qwen3-coder:480b-cloud",
+      "role": "judge",
+      "n_items": 9,
+      "quant": null,
+      "objective_accuracy": 0.6431924882629109,
+      "agreement_r": 0.0,
+      "kappa_z": -3.4641016151377553,
+      "alt_test_omega": 0.0,
+      "consistency": 1.0,
+      "ece": null,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.0,
+      "seat_decision": "reject",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.643; Wilson-95 lower 0.208 \u2264 0.50 \u2192 NO margin over chance \u2717 (REJECT)",
+        "agreement r=0.000 (< 0.80); \u03ba=0.000 (< one-sided floor 0.347); z vs human -3.46 (within band)",
+        "alt-test \u03c9=0.000 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (< 0.50 \u2192 SCREEN-only)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE not measured (no confidences) \u2014 no calibration penalty (\u00a712)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.522 (CI [0.304, 0.669]) vs floor 0.55",
+        "DECISION: REJECT \u2014 no accuracy margin"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.20765960080204765,
+        "difficulty_weighted_accuracy": 0.6431924882629109,
+        "kappa": 0.0,
+        "kappa_one_sided_floor": 0.3473573889553335,
+        "quality_score": 0.5215962441314554,
+        "score_ci": [
+          0.3038298004010238,
+          0.6692540276398018
+        ],
+        "review_flag": false,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "gpt-oss:120b-cloud": {
+      "model_id": "gpt-oss:120b-cloud",
+      "role": "judge",
+      "n_items": 9,
+      "quant": null,
+      "objective_accuracy": 0.7433489827856026,
+      "agreement_r": 0.0,
+      "kappa_z": -3.4641016151377553,
+      "alt_test_omega": 0.5,
+      "consistency": 0.6666666666666667,
+      "ece": null,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.0,
+      "seat_decision": "reject",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.743; Wilson-95 lower 0.208 \u2264 0.50 \u2192 NO margin over chance \u2717 (REJECT)",
+        "agreement r=0.000 (< 0.80); \u03ba=0.000 (< one-sided floor 0.347); z vs human -3.46 (within band)",
+        "alt-test \u03c9=0.500 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (\u2265 0.50 \u2192 seat-eligible)",
+        "consistency 0.667 (< 0.80 test-retest floor)",
+        "ECE not measured (no confidences) \u2014 no calibration penalty (\u00a712)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.505 (CI [0.237, 0.603]) vs floor 0.55",
+        "DECISION: REJECT \u2014 no accuracy margin"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.20765960080204765,
+        "difficulty_weighted_accuracy": 0.7433489827856026,
+        "kappa": 0.0,
+        "kappa_one_sided_floor": 0.3473573889553335,
+        "quality_score": 0.5050078247261347,
+        "score_ci": [
+          0.23716313373435718,
+          0.6025873609731351
+        ],
+        "review_flag": false,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "gemini-3-flash-preview:cloud": {
+      "model_id": "gemini-3-flash-preview:cloud",
+      "role": "judge",
+      "n_items": 6,
+      "quant": null,
+      "objective_accuracy": 1.0,
+      "agreement_r": 0.0,
+      "kappa_z": 0.7071067811865474,
+      "alt_test_omega": 1.0,
+      "consistency": 1.0,
+      "ece": null,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.0,
+      "seat_decision": "reject",
+      "notes": [
+        "accuracy (difficulty-weighted) 1.000; Wilson-95 lower 0.342 \u2264 0.50 \u2192 NO margin over chance \u2717 (REJECT)",
+        "agreement r=0.000 (< 0.80); \u03ba=1.000 (\u2265 one-sided floor 0.246); z vs human +0.71 (within band)",
+        "alt-test \u03c9=1.000 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (\u2265 0.50 \u2192 seat-eligible)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE not measured (no confidences) \u2014 no calibration penalty (\u00a712)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.700 (CI [0.371, 0.700]) vs floor 0.55",
+        "DECISION: REJECT \u2014 no accuracy margin",
+        "[degraded] profiled on a PARTIAL item set \u2014 1 item(s) dropped: ['prec-06-comparison-below-bitwise (timeout)']"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.34238022750665303,
+        "difficulty_weighted_accuracy": 1.0,
+        "kappa": 1.0,
+        "kappa_one_sided_floor": 0.24562828354974675,
+        "quality_score": 0.7,
+        "score_ci": [
+          0.37119011375332656,
+          0.7
+        ],
+        "review_flag": false,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 1
+      }
+    }
+  },
+  "known_groups": {
+    "trivial_item_count": 0,
+    "violations": [],
+    "passed": true
+  },
+  "panel_correlation": {
+    "pairwise_error_correlation": {
+      "gemini-3-flash-preview:cloud|gpt-oss:120b-cloud": 0.0,
+      "gemini-3-flash-preview:cloud|qwen3-coder:480b-cloud": 0.0,
+      "gpt-oss:120b-cloud|qwen3-coder:480b-cloud": -0.5
+    },
+    "submodular": false
+  },
+  "irt_prune": {
+    "n_items": 2,
+    "kept_count": 0,
+    "dropped_count": 2,
+    "kept": [],
+    "dropped": [
+      "pair-21-modulo",
+      "prec-07-comparison-chaining"
+    ],
+    "note": "ATLAS screen: drop zero-variance (saturated) or low-r_pb items; DEGRADED to the 2-item subset shared across all models \u2014 1 item(s) dropped (not graded by every model after per-item salvage)",
+    "ragged_dropped_count": 1,
+    "ragged_dropped": [
+      "prec-06-comparison-below-bitwise"
+    ]
+  },
+  "grade_matrix": {
+    "qwen3-coder:480b-cloud": {
+      "pair-21-modulo": true,
+      "prec-06-comparison-below-bitwise": true,
+      "prec-07-comparison-chaining": false
+    },
+    "gpt-oss:120b-cloud": {
+      "pair-21-modulo": true,
+      "prec-06-comparison-below-bitwise": false,
+      "prec-07-comparison-chaining": true
+    },
+    "gemini-3-flash-preview:cloud": {
+      "pair-21-modulo": true,
+      "prec-07-comparison-chaining": true
+    }
+  },
+  "perturbation": {
+    "max_flip_rate": 0.0,
+    "by_model": {
+      "qwen3-coder:480b-cloud": {
+        "baseline_decision": "reject",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "gpt-oss:120b-cloud": {
+        "baseline_decision": "reject",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "gemini-3-flash-preview:cloud": {
+        "baseline_decision": "reject",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      }
+    },
+    "andon": "high max_flip_rate \u2192 gate sits within threshold noise; decisions not yet robust"
+  },
+  "calibration": {
+    "by_model": {
+      "qwen3-coder:480b-cloud": {
+        "mean_temperature": 1.0,
+        "ece_raw": null,
+        "ece_cv": null
+      },
+      "gpt-oss:120b-cloud": {
+        "mean_temperature": 1.0,
+        "ece_raw": null,
+        "ece_cv": null
+      },
+      "gemini-3-flash-preview:cloud": {
+        "mean_temperature": 1.0,
+        "ece_raw": null,
+        "ece_cv": null
+      }
+    },
+    "note": "temperature scaling (Guo 2017) measured HELD-OUT: k-fold grouped by item"
+  },
+  "panel_composition": {
+    "seats": [],
+    "submodular": true,
+    "meets_quorum": false,
+    "escalate": true,
+    "not_seated": [
+      "gemini-3-flash-preview:cloud",
+      "gpt-oss:120b-cloud",
+      "qwen3-coder:480b-cloud"
+    ],
+    "dropped_redundant": [],
+    "threshold": 0.25,
+    "min_judges": 3,
+    "notes": [
+      "0 judge(s) seated from 0 admitted; 0 dropped as \u03c1-redundant (\u22650.25); 3 not admitted (screen/reject)",
+      "quorum 0/3: NOT MET \u2192 escalate to the Claude Designer (PoLL \u22653); too few independent judges to trust a panel verdict",
+      "submodularity: PASS (every seated pair |\u03c1| < 0.25)"
+    ]
+  }
+}

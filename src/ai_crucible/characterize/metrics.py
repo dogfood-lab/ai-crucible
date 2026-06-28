@@ -93,6 +93,7 @@ _TEMP_EPS = 1e-6  # clamp confidences off {0, 1} so the logit is finite
 __all__ = [
     "objective_accuracy",
     "difficulty_weighted_accuracy",
+    "effective_sample_size",
     "agreement",
     "kappa_zscore",
     "human_like_kappa",
@@ -209,6 +210,60 @@ def difficulty_weighted_accuracy(records: list[JudgmentRecord]) -> float:
         # with all-equal weights, but compute it directly so the contract is obvious).
         return objective_accuracy(records)
     return num / den
+
+
+def effective_sample_size(records: list[JudgmentRecord]) -> float:
+    """Kish effective sample size over the per-ITEM difficulty weights — the design-effect
+    correction the §12 difficulty-weighted-accuracy Wilson interval needs.
+
+    A difficulty-weighted accuracy ``p_w = Σ w_i·correct_i / Σ w_i`` is NOT a binomial
+    ``successes / n`` — feeding ``round(p_w · n_items)`` to :func:`wilson_interval` fabricates
+    a count and understates uncertainty (a coin-flip judge whose few HEAVY items happen to be
+    right then reads as a confident pass — characterize eval-integrity). The honest interval
+    is a *weighted-proportion* interval at the **effective** sample size (Kish 1965 design
+    effect): ``n_eff = (Σ w_i)² / Σ w_i²`` over the ``n`` distinct items. Heterogeneous
+    weights (one known-impossible item at w=9 dominating ~90 trivial items) drive ``n_eff``
+    well below ``n_items``, widening the Wilson interval exactly as the concentration warrants.
+    Uniform weights (the no-difficulty path) give ``n_eff == n_items`` — so on an unweighted
+    set the correction is a no-op and the interval is the plain per-item Wilson.
+
+    The weight per item mirrors :func:`difficulty_weighted_accuracy` (the declared
+    ``metadata["difficulty"]`` when ``> 0``, else 1.0) and is taken **per distinct item**
+    (NOT per record): the ``k`` test-retest reruns of an item reinforce its correctness but
+    add no independent sampling information, so counting them would re-introduce the
+    pseudo-replication the per-item unit exists to avoid.
+
+    Args:
+        records: the judge's records (non-empty); difficulty optional in
+            ``metadata["difficulty"]``.
+
+    Returns:
+        The effective sample size in ``(0, n_items]`` (== ``n_items`` when weights are
+        uniform).
+
+    Raises:
+        ValueError: if ``records`` is empty.
+    """
+    _require_records(records, "effective_sample_size")
+    item_weights: dict[str, float] = {}
+    for r in records:
+        if r.item_id in item_weights:
+            continue
+        raw = r.metadata.get("difficulty")
+        weight = 1.0
+        if raw is not None:
+            try:
+                w = float(raw)
+            except (TypeError, ValueError):
+                w = 0.0
+            if w > 0.0:
+                weight = w
+        item_weights[r.item_id] = weight
+    sum_w = sum(item_weights.values())
+    sum_w2 = sum(w * w for w in item_weights.values())
+    if sum_w2 <= 0.0:
+        return float(len(item_weights))
+    return (sum_w * sum_w) / sum_w2
 
 
 def _numeric_pairs(records: list[JudgmentRecord]) -> tuple[list[float], list[float]]:

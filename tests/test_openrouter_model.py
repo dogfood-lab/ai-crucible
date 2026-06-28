@@ -27,6 +27,8 @@ from ai_crucible.models import OpenRouterModel, is_openrouter_spec
 from ai_crucible.models.ollama_adapter import ModelMismatchError
 from ai_crucible.models.openrouter_adapter import (
     OpenRouterBadResponseError,
+    OpenRouterUnreachableError,
+    _is_transient_openrouter,
     _norm_openrouter,
 )
 from ai_crucible.scoring.judge_panel import judge_family
@@ -144,6 +146,25 @@ def test_judge_item_record_shape() -> None:
     assert rec.metadata["options"]["temperature"] == 0
 
 
+def test_extract_text_normalizes_gpt_oss_harmony_leak() -> None:
+    """A gpt-oss judge served via OpenRouter that leaks OpenAI Harmony control tokens into
+    ``content`` is collapsed to its final-channel answer (the shared _normalize_harmony) BEFORE
+    the judge/solver parser sees it — the analysis channel (hidden reasoning) is dropped, the
+    final channel's body is the verdict. Without this an OpenRouter gpt-oss judge mis-grades on
+    the raw leaked string (the same defense the Ollama adapter already applies)."""
+    harmony = (
+        "<|start|>assistant<|channel|>analysis<|message|>hidden reasoning here<|end|>"
+        "<|channel|>final<|message|>B<|end|>"
+    )
+    client = FakeOpenRouterClient(harmony, served_model="openai/gpt-oss-120b")
+    model = OpenRouterModel("openrouter:openai/gpt-oss-120b", family="openai", client=client)
+    rec = asyncio.run(model.judge_item("A: wrong. B: right. Reply with one letter."))
+    assert rec.predicted == "B"  # the final-channel answer, NOT the raw Harmony string
+    # A clean (non-Harmony) deepseek/qwen/cohere response is returned byte-for-byte.
+    clean = OpenRouterModel(_SPEC, family="deepseek", client=FakeOpenRouterClient("A"))
+    assert asyncio.run(clean.judge_item("rate this")).predicted == "A"
+
+
 def test_judge_item_confidence_from_openai_logprob() -> None:
     client = FakeOpenRouterClient("A", first_logprob=-0.10536)  # exp(-0.10536) ≈ 0.90
     model = _model(client)
@@ -232,6 +253,35 @@ def test_no_warning_for_unknown_vendor_or_family() -> None:
         warnings.simplefilter("error")
         OpenRouterModel("openrouter:somevendor/some-model", family="whatever")
         OpenRouterModel("openrouter:deepseek/deepseek-chat", family="")  # seated placeholder
+
+
+# --------------------------------------------------------------------------- #
+# §8.6 transient classifier — 429 rate-limit is retryable (the rate-limit-as-fatal fix)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_transient_openrouter_retries_429_and_5xx_not_other_4xx() -> None:
+    """A 429 rate limit is a TRANSIENT the bounded backoff must absorb — OpenRouter's shared
+    free pool 429s constantly, and a panel run's parallel calls hit per-minute limits — so a
+    429 must NOT abort the whole model's run. A 5xx stays transient; any OTHER 4xx (400/401/404)
+    is not (retrying won't help). Shape/provenance errors are never transient."""
+    import httpx
+
+    def status_err(code: int) -> httpx.HTTPStatusError:
+        req = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        resp = httpx.Response(code, request=req)
+        return httpx.HTTPStatusError(str(code), request=req, response=resp)
+
+    assert _is_transient_openrouter(status_err(429)) is True  # the fix: was non-retryable
+    assert _is_transient_openrouter(status_err(503)) is True
+    assert _is_transient_openrouter(status_err(500)) is True
+    assert _is_transient_openrouter(status_err(400)) is False
+    assert _is_transient_openrouter(status_err(401)) is False
+    assert _is_transient_openrouter(status_err(404)) is False
+    # the structured unreachable error is transient; shape/provenance breaches are not.
+    assert _is_transient_openrouter(OpenRouterUnreachableError("base", "m")) is True
+    assert _is_transient_openrouter(OpenRouterBadResponseError("m", "base", "bad")) is False
+    assert _is_transient_openrouter(ModelMismatchError("a", "b")) is False
 
 
 # --------------------------------------------------------------------------- #

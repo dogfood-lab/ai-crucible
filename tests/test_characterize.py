@@ -44,6 +44,7 @@ from ai_crucible.characterize.metrics import (
     apply_temperature,
     consistency,
     difficulty_weighted_accuracy,
+    effective_sample_size,
     expected_calibration_error,
     family_pref_delta,
     fit_temperature,
@@ -57,6 +58,7 @@ from ai_crucible.characterize.metrics import (
 )
 from ai_crucible.characterize.profile import (
     SeatGates,
+    _accuracy_wilson,
     build_profile,
     perturbation_audit,
 )
@@ -66,6 +68,7 @@ from ai_crucible.characterize.types import (
     RoleSlot,
     SeatDecision,
 )
+from ai_crucible.scoring.stats import wilson_interval
 
 # --------------------------------------------------------------------------- #
 # Synthetic-record builders
@@ -724,6 +727,51 @@ def test_difficulty_weighted_accuracy_weights_hard_items() -> None:
         rec("hard", 2, 2, difficulty=9.0),
     ]
     assert difficulty_weighted_accuracy(hard_hit) == pytest.approx(0.9)
+
+
+def test_effective_sample_size_uniform_equals_n_items() -> None:
+    """No difficulty signal ⇒ uniform weights ⇒ n_eff == n_items (the correction is a no-op
+    on the common, unweighted trivial-anchor path)."""
+    records = [rec(f"i{i}", 1, 1) for i in range(8)]
+    assert effective_sample_size(records) == pytest.approx(8.0)
+    # Reruns of the same item are NOT independent trials — n_eff counts distinct items.
+    with_reruns = [rec("i0", 1, 1, run_index=k) for k in range(3)] + [rec("i1", 1, 1)]
+    assert effective_sample_size(with_reruns) == pytest.approx(2.0)
+
+
+def test_effective_sample_size_drops_under_heterogeneous_weights() -> None:
+    """Kish design effect: 5 heavy items (w=9) + 5 light (w=1) ⇒ n_eff = (Σw)²/Σw² =
+    50²/410 ≈ 6.1, well below the 10 nominal items — the concentration that must widen the CI."""
+    records = [rec(f"hard{i}", 1, 1, difficulty=9.0) for i in range(5)]
+    records += [rec(f"easy{i}", 0, 1, difficulty=1.0) for i in range(5)]
+    assert effective_sample_size(records) == pytest.approx(2500 / 410)
+
+
+def test_weighted_accuracy_wilson_uses_effective_n_not_fabricated_count() -> None:
+    """Eval-integrity regression (characterize HIGH): a judge answering at CHANCE on raw items
+    (5/10) that happens to get the few HEAVY items right has difficulty-weighted accuracy 0.9 —
+    but with only n_eff≈6.1 effective items the Wilson-95 lower bound is < 0.5, so it earns NO
+    confident margin over chance. The pre-fix code fed the FABRICATED count round(0.9·10)=9 to
+    Wilson(9,10) (lower≈0.60 > 0.5) and would have admitted it on the accuracy gate.
+    """
+    # 5 heavy items answered correctly (predicted==gold), 5 light items wrong (predicted=0≠gold).
+    correct_hard = [rec(f"hard{i}", (i % 5) + 1, (i % 5) + 1, difficulty=9.0) for i in range(5)]
+    wrong_easy = [rec(f"easy{i}", 0, 9, difficulty=1.0) for i in range(5)]
+    records = correct_hard + wrong_easy
+    assert objective_accuracy(records) == pytest.approx(0.5)
+    assert difficulty_weighted_accuracy(records) == pytest.approx(0.9)
+
+    # The FIX: Wilson at the effective N ⇒ lower bound below the 0.5 chance floor.
+    acc_lo_fixed, _ = _accuracy_wilson(0.9, effective_sample_size(records))
+    assert acc_lo_fixed < 0.50
+    # The BUG it replaces: the fabricated binomial count round(0.9·10)=9 at the full n_items.
+    acc_lo_buggy, _ = wilson_interval(9, 10, conf=0.95)
+    assert acc_lo_buggy > 0.50
+
+    # Integration: build_profile records the CORRECTED lower bound → no accuracy margin.
+    prof = build_profile("coinflip-hardhit", RoleSlot.JUDGE, records, human_human_kappa=0.80)
+    assert prof.metadata["accuracy_wilson_lower"] < 0.50
+    assert prof.seat_decision is SeatDecision.REJECT
 
 
 def test_quality_score_is_monotonic_in_accuracy() -> None:

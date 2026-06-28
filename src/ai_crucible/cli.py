@@ -100,6 +100,24 @@ commands:
                  test-framing and report whether behaviour (bait-touch / solve) DIVERGES
                  (a leaking eval cue, §10.5). usage:
                    ai-crucible probe <puzzle-dir> --model <id>[@family] [--k N]
+  labels         OFFLINE intake gate for a human_labels.json — validate a candidate label
+                 file and report the alt-test inputs (annotator count, item count, ε, IAA
+                 Krippendorff α, DISPUTED drops, under-power note) with NO model run
+                 (Fork C, §12.2). usage:
+                   ai-crucible labels validate <human_labels.json> [--items <path>]
+                 Defaults the calibration items to the bundled admission_pairs.json; pass
+                 --items for your own set. A copy-paste starting point ships at
+                 calibration/human_labels.example.json. Human chrome → STDERR; machine
+                 JSON → STDOUT. (ω stays the circular model-jury bootstrap until ≥3
+                 INDEPENDENT human annotators exist — this is the day-they-arrive plumbing.)
+  calibration    curate a harder, less-saturated discriminating admission set (study-swarm
+                 Phase A). usage:
+                   ai-crucible calibration curate --from-run <report.json>
+                       [--items <pool>] [--out <curated.json>]
+                 Runs the discrimination screen (AFLite/§12: keep what strong judges DISAGREE
+                 on, drop the saturated) over a pool using a run report's persisted
+                 grade_matrix; --out writes the kept subset, re-usable as `characterize
+                 --items`. Offline, NO model. Human chrome → STDERR; machine JSON → STDOUT.
   catalog        read + curate the durable catalog (Epic 4 persistence/graduation). usage:
                    ai-crucible catalog list   [--catalog PATH]
                    ai-crucible catalog show   <puzzle-id> [--catalog PATH]
@@ -124,6 +142,9 @@ exit codes:
      gates should treat 1 (degraded/empty result) distinctly from 2 (bad invocation).
   1  (run) the puzzle failed to load or stage (a structured [CODE] msg (hint:) error on
      stderr) — distinct from 2 (a bad invocation that never reached the cycle).
+  1  (labels validate) the label/items file is missing or malformed (a structured
+     [CODE] msg (hint:) error on stderr) — distinct from 2 (a bad invocation). A VALID
+     but under-powered file (<30 items) is exit 0 with `under_powered: true` in the JSON.
 """
 
 
@@ -147,6 +168,12 @@ def _dispatch(command: str, rest: list[str]) -> int:
 
     if command == "probe":
         return _probe_command(rest)
+
+    if command == "labels":
+        return _labels_command(rest)
+
+    if command == "calibration":
+        return _calibration_command(rest)
 
     sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
@@ -467,6 +494,292 @@ def _probe_command(rest: list[str]) -> int:
         "deploy_solve_rate": result.deploy_solve_rate, "test_solve_rate": result.test_solve_rate,
         "bait_divergence": result.bait_divergence, "diverged": result.diverged,
     }, default=str) + "\n")
+    return 0
+
+
+def _labels_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible labels validate <path> [--items <path>]`` (Fork C, §12.2).
+
+    The OFFLINE intake gate for a candidate ``human_labels.json``: it validates the file and
+    reports the alt-test inputs (annotator count, item count, ε, IAA Krippendorff α, DISPUTED
+    drops, the under-power note) WITHOUT seating a single model or touching a GPU. It exists
+    so an operator can check a label file the day independent annotators deliver one — long
+    before a full ``characterize --human-labels`` run (model load + judging) is worth it. It
+    calls the SAME :func:`load_human_labels` the run uses, so a file that validates here is
+    exactly a file the run accepts. Stage-C honesty: human chrome → STDERR, machine JSON →
+    STDOUT. A bad invocation (no subcommand / no path) is exit 2; a missing/malformed file
+    raises the loader's structured ``[CODE] msg (hint:)`` error, rendered as one line by
+    ``main()`` (exit 1).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="ai-crucible labels", add_help=True)
+    sub = parser.add_subparsers(dest="action")
+
+    p_val = sub.add_parser(
+        "validate", help="validate a human_labels.json offline (reports ε/IAA/disputed, no model)"
+    )
+    p_val.add_argument("path", help="the candidate human_labels.json to validate")
+    p_val.add_argument(
+        "--items",
+        type=Path,
+        default=None,
+        help="calibration items file/dir the labels are over "
+        "(default: the bundled admission_pairs.json)",
+    )
+
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if args.action is None:
+        sys.stderr.write("ai-crucible labels: a subcommand is required (validate)\n")
+        return 2
+    if args.action == "validate":
+        return _labels_validate(Path(args.path), args.items)
+    sys.stderr.write(f"ai-crucible labels: unknown subcommand {args.action!r}\n")
+    return 2
+
+
+def _labels_validate(path: Path, items_path: Path | None) -> int:
+    """``labels validate`` — load + validate a label file in CHECK-ONLY mode and report the
+    alt-test inputs. NO model is seated (that is the whole point — §12.2 intake plumbing).
+
+    ``load_human_labels`` validates everything (shape, tiers, unknown items/annotators, the
+    ≥3-annotator floor) and computes ε / IAA / DISPUTED before any model exists, so calling
+    it IS the check-only mode. A failure raises the loader's structured ``[CODE] msg (hint:)``
+    error (rendered as one line by ``main()``, exit 1). A file that loads but falls below the
+    ≥30-item floor is VALID-but-under-powered: exit 0 with ``under_powered: true`` and a loud
+    note (the loader's honest-surface contract — it does not hard-fail on N<30).
+    """
+    import json as _json
+
+    from ai_crucible.calibration.loader import load_items
+    from ai_crucible.characterize.human_labels import (
+        MIN_ANNOTATORS,
+        MIN_ITEMS,
+        load_human_labels,
+    )
+
+    if items_path is not None:
+        items = load_items(items_path)
+        items_source = str(items_path)
+    else:
+        # The default the run uses too: the bundled judge-admission pairs set, which the
+        # committed calibration/human_labels.example.json is keyed against (so the example
+        # validates out of the box with no --items). Sibling of this module's calibration/.
+        default_items = Path(__file__).parent / "calibration" / "admission_pairs.json"
+        items = load_items(default_items)
+        items_source = default_items.name
+
+    hl = load_human_labels(path, items)
+    under_powered = hl.n_items < MIN_ITEMS
+
+    # Human chrome → STDERR.
+    lines = [f"ai-crucible labels validate — {path}"]
+    lines.append(f"  items source      : {items_source} ({len(items)} calibration items)")
+    lines.append(f"  annotators        : {hl.n_annotators} (floor ≥ {MIN_ANNOTATORS})")
+    lines.append(
+        f"  labeled items     : {hl.n_items} (floor ≥ {MIN_ITEMS})"
+        + ("   ** UNDER-POWERED **" if under_powered else "")
+    )
+    lines.append(f"  substitution ε    : {hl.epsilon:.2f}")
+    lines.append(f"  IAA Krippendorff α: {hl.iaa_alpha:.4f}")
+    lines.append(
+        f"  DISPUTED dropped  : {len(hl.disputed)}"
+        + (f" ({', '.join(hl.disputed)})" if hl.disputed else "")
+    )
+    if hl.notes:
+        lines.append("  notes:")
+        lines.extend(f"    - {note}" for note in hl.notes)
+    lines.append("")
+    if under_powered:
+        lines.append(
+            "  VALID but UNDER-POWERED — accepted by `characterize --human-labels`, but ω is "
+            "under-powered below the 30-item floor (add items). No model was seated for this check."
+        )
+    else:
+        lines.append(
+            "  VALID — accepted by `characterize --human-labels`. No model was seated for this "
+            "check (ω stays the circular model-jury bootstrap until ≥3 INDEPENDENT humans exist)."
+        )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+    # Machine JSON → STDOUT (mirrors the run report's `human_alt_test` block).
+    sys.stdout.write(
+        _json.dumps(
+            {
+                "ok": True,
+                "path": str(path),
+                "items_source": items_source,
+                "n_calibration_items": len(items),
+                "n_annotators": hl.n_annotators,
+                "n_items_labeled": hl.n_items,
+                "epsilon": hl.epsilon,
+                "iaa_krippendorff_alpha": round(hl.iaa_alpha, 4),
+                "disputed_items": hl.disputed,
+                "n_disputed": len(hl.disputed),
+                "under_powered": under_powered,
+                "notes": hl.notes,
+            },
+            default=str,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _calibration_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible calibration curate --from-run <report.json> [--items] [--out]``.
+
+    The harder-set CURATION pipeline (study-swarm Phase A — the design lives in
+    ``swarm/openrouter-quorum/STUDY-SWARM-harder-calibration-set.md``). Reads a characterization
+    report's persisted ``grade_matrix`` and runs the DISCRIMINATION screen (AFLite/§12: keep the
+    items strong judges DISAGREE on, drop the saturated ones every judge already passes) over the
+    candidate pool, reporting the curated discriminating subset + every drop reason. With ``--out``
+    it writes the kept items as a standalone calibration JSON directly re-usable as ``characterize
+    --items``. The AMBIGUITY GATE (``calibration.curate.ambiguity_gate``) needs >=2 independent
+    verifier verdicts per item, so it is NOT run by this offline command — it ships as a tested
+    library function for the next step. NO model is seated and NO GPU is touched. Human chrome ->
+    STDERR, machine JSON -> STDOUT; a bad invocation is exit 2; a report without a grade_matrix
+    raises a structured ``[CODE] msg (hint:)`` error (exit 1).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="ai-crucible calibration", add_help=True)
+    sub = parser.add_subparsers(dest="action")
+    p_cur = sub.add_parser(
+        "curate", help="curate the discriminating subset from a run report (offline, no model)"
+    )
+    p_cur.add_argument(
+        "--from-run", type=Path, required=True, dest="from_run",
+        help="a characterization report.json carrying a persisted grade_matrix",
+    )
+    p_cur.add_argument(
+        "--items", type=Path, default=None,
+        help="the candidate item pool (default: the bundled admission_pairs.json)",
+    )
+    p_cur.add_argument(
+        "--out", type=Path, default=None,
+        help="write the curated discriminating subset here (re-usable as `characterize --items`)",
+    )
+    p_cur.add_argument("--min-variance", type=float, default=0.0, dest="min_variance")
+    p_cur.add_argument(
+        "--min-point-biserial", type=float, default=0.1, dest="min_point_biserial"
+    )
+
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if args.action is None:
+        sys.stderr.write("ai-crucible calibration: a subcommand is required (curate)\n")
+        return 2
+    if args.action == "curate":
+        return _calibration_curate(
+            args.from_run, args.items, args.out, args.min_variance, args.min_point_biserial
+        )
+    sys.stderr.write(f"ai-crucible calibration: unknown subcommand {args.action!r}\n")
+    return 2
+
+
+def _calibration_curate(
+    from_run: Path,
+    items_path: Path | None,
+    out_path: Path | None,
+    min_variance: float,
+    min_point_biserial: float,
+) -> int:
+    """``calibration curate`` — discrimination-curate a pool against a run's grade-matrix (offline).
+
+    Reads ``from_run``'s ``grade_matrix`` (persisted by ``characterize``), runs
+    :func:`~ai_crucible.calibration.curate.curate` over the loaded pool, optionally writes the kept
+    subset to ``out_path`` (the raw pool JSON filtered to the kept ids — same shape, so it drops
+    straight into a future ``characterize --items`` run), and reports. A report predating
+    grade-matrix persistence raises a structured error.
+    """
+    import json as _json
+
+    from ai_crucible.calibration.curate import curate
+    from ai_crucible.calibration.loader import load_items
+
+    pool_path = (
+        items_path
+        if items_path is not None
+        else Path(__file__).parent / "calibration" / "admission_pairs.json"
+    )
+    items = load_items(pool_path)
+
+    report = _json.loads(Path(from_run).read_text(encoding="utf-8"))
+    grade_matrix = report.get("grade_matrix")
+    if not isinstance(grade_matrix, dict) or not grade_matrix:
+        raise ValueError(
+            f"[CALIBRATION_NO_GRADE_MATRIX] the report at {from_run} carries no 'grade_matrix' "
+            "(hint: it predates grade-matrix persistence — re-run `ai-crucible characterize "
+            "--out <report.json>` to produce a curate-able report)"
+        )
+
+    result = curate(
+        items, grade_matrix, min_variance=min_variance, min_point_biserial=min_point_biserial
+    )
+
+    wrote: str | None = None
+    if out_path is not None:
+        raw = _json.loads(Path(pool_path).read_text(encoding="utf-8"))
+        kept = set(result.kept)
+        subset = [it for it in raw if isinstance(it, dict) and it.get("id") in kept]
+        Path(out_path).write_text(_json.dumps(subset, indent=2), encoding="utf-8")
+        wrote = str(out_path)
+
+    # Human chrome -> STDERR.
+    lines = [
+        f"ai-crucible calibration curate — pool {pool_path.name} ({len(items)} items) "
+        f"vs {from_run}"
+    ]
+    lines.extend(f"  {n}" for n in result.notes)
+    if wrote:
+        lines.append(
+            f"  wrote curated subset -> {wrote} "
+            f"({len(result.kept)} items; re-use as `characterize --items {wrote}`)"
+        )
+    else:
+        lines.append(
+            "  (no --out: reporting only; pass --out <curated.json> to materialize the subset)"
+        )
+    lines.append("")
+    lines.append(
+        "  NOTE: discrimination screen only — the AMBIGUITY GATE (defensible-key check) needs >=2"
+    )
+    lines.append(
+        "        independent verifier verdicts per item and is not run by this offline command."
+    )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+    # Machine JSON -> STDOUT.
+    sys.stdout.write(
+        _json.dumps(
+            {
+                "ok": True,
+                "from_run": str(from_run),
+                "pool": pool_path.name,
+                "n_pool_items": len(items),
+                "n_kept": len(result.kept),
+                "kept": result.kept,
+                "n_dropped_saturated": len(result.dropped_saturated),
+                "n_dropped_low_discrimination": len(result.dropped_low_discrimination),
+                "dropped_saturated": result.dropped_saturated,
+                "dropped_low_discrimination": result.dropped_low_discrimination,
+                "n_dropped_ragged": len(result.dropped_ragged),
+                "dropped_ragged": result.dropped_ragged,
+                "ambiguity_gate": "not_run_offline",
+                "wrote": wrote,
+            },
+            default=str,
+        )
+        + "\n"
+    )
     return 0
 
 

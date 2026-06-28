@@ -1,0 +1,230 @@
+{
+  "kind": "SCREENING (provisional, free models \u2014 NOT a scored run; no panel.json written)",
+  "n_items_per_model": 6,
+  "spacing_s": 3.2,
+  "candidates": [
+    {
+      "spec": "openrouter:meta-llama/llama-3.3-70b-instruct:free",
+      "family": "meta",
+      "n_items": 6,
+      "n_correct": 1,
+      "n_unparsed": 0,
+      "n_dropped": 5,
+      "accuracy": 1.0,
+      "per_item": [
+        {
+          "id": "pair-00-add",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-01-cap",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-04-even",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-11-syll1",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-09-pct",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-18-daysweek",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        }
+      ]
+    },
+    {
+      "spec": "openrouter:qwen/qwen3-next-80b-a3b-instruct:free",
+      "family": "qwen",
+      "n_items": 6,
+      "n_correct": 0,
+      "n_unparsed": 0,
+      "n_dropped": 6,
+      "accuracy": null,
+      "per_item": [
+        {
+          "id": "pair-00-add",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-01-cap",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-04-even",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-11-syll1",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-09-pct",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        },
+        {
+          "id": "pair-18-daysweek",
+          "result": "DROPPED",
+          "err": "HTTPStatusError(\"Client error '429 Too Many Requests' for url 'https://openrouter.ai/api/v1/chat/completions'\\nFor more "
+        }
+      ]
+    },
+    {
+      "spec": "openrouter:cohere/north-mini-code:free",
+      "family": "cohere",
+      "n_items": 6,
+      "n_correct": 6,
+      "n_unparsed": 0,
+      "n_dropped": 0,
+      "accuracy": 1.0,
+      "per_item": [
+        {
+          "id": "pair-00-add",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-01-cap",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-04-even",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-11-syll1",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-09-pct",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-18-daysweek",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "spec": "openrouter:nvidia/nemotron-3-super-120b-a12b:free",
+      "family": "nvidia",
+      "n_items": 6,
+      "n_correct": 5,
+      "n_unparsed": 1,
+      "n_dropped": 0,
+      "accuracy": 0.8333333333333334,
+      "per_item": [
+        {
+          "id": "pair-00-add",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-01-cap",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-04-even",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-11-syll1",
+          "result": "UNPARSED",
+          "raw": "We need to answer:<unk><unk><unk><unk><unk><unk><unk><unk><u"
+        },
+        {
+          "id": "pair-09-pct",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-18-daysweek",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "spec": "openrouter:google/gemma-4-31b-it:free",
+      "family": "gemma-control",
+      "n_items": 6,
+      "n_correct": 6,
+      "n_unparsed": 0,
+      "n_dropped": 0,
+      "accuracy": 1.0,
+      "per_item": [
+        {
+          "id": "pair-00-add",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-01-cap",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-04-even",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        },
+        {
+          "id": "pair-11-syll1",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-09-pct",
+          "gold": "B",
+          "parsed": "B",
+          "correct": true
+        },
+        {
+          "id": "pair-18-daysweek",
+          "gold": "A",
+          "parsed": "A",
+          "correct": true
+        }
+      ]
+    }
+  ]
+}

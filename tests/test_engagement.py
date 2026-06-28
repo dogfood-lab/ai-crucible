@@ -227,6 +227,32 @@ def test_assert_no_chrome_leak_RAISES_on_catalog_standing_token() -> None:
         assert_no_chrome_leak(leaked, chrome)
 
 
+def test_chrome_token_scan_is_field_agnostic_to_a_future_field() -> None:
+    """FUTURE-PROOFING (the field-agnostic guard fix): a Tier-3 field added to Chrome later
+    — its docstring already names ``prizes`` — must NOT be able to leak into scored context
+    while the guard reports clean. ``_chrome_tokens`` now walks ``dataclasses.fields`` instead
+    of a hand-enumerated four-field list, so a value in ANY field (here a synthetic stand-in
+    for a future addition) is tokenized and caught. Before the fix a fifth field slipped
+    through silently — the exact silently-misleading result an eval-integrity instrument must
+    never produce."""
+    import dataclasses
+
+    @dataclasses.dataclass
+    class _FutureChrome:
+        rank: int | None = None
+        cohort_size: int | None = None
+        leaderboard: tuple = ()
+        catalog_standing: str = ""
+        prizes: str = ""  # a NEW Tier-3 signal absent from today's Chrome
+
+    chrome = _FutureChrome(prizes="PRIZECANARY9")
+    leaked = [{"role": "user", "content": "you could win PRIZECANARY9 if you solve this"}]
+    with pytest.raises(SealedBoundaryViolation, match="PRIZECANARY9"):
+        assert_no_chrome_leak(leaked, chrome)
+    # Control: the same future-shaped chrome does NOT trip a clean context.
+    assert_no_chrome_leak([{"role": "user", "content": "solve the puzzle"}], chrome)
+
+
 def test_assert_no_chrome_leak_error_names_role_and_index() -> None:
     """The andon log must be precise: the violation message names the offending
     token, the message index, and the role (for a clean kernel halt log)."""

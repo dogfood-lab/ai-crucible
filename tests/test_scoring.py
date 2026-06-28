@@ -551,16 +551,41 @@ def test_multiple_failed_conditions_all_reported(
     } <= failed
 
 
-def test_unknown_penalty_name_is_surfaced_not_scored(
+def test_unknown_penalty_name_fails_closed_and_is_surfaced(
     scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
 ) -> None:
-    """A triggered penalty not declared on the puzzle can't be scored (no weight),
-    but must be visible in metadata so the misconfig isn't silently swallowed."""
+    """A triggered penalty NOT declared on the puzzle has no resolvable weight/flavor, so the
+    gate fails CLOSED (`unknown_penalty_fired`) rather than passing on it — an unresolved name
+    might be a typo'd CRITICAL penalty whose veto would otherwise be silently skipped. The name
+    is still surfaced in metadata so the misconfig is legible (§8.2 conservative)."""
     outcome = _clean_outcome(triggered_penalties=["not_a_declared_penalty"])
     score = grade(scoring_attempt, scoring_meta, outcome)
-    assert score.metadata["gate_passed"] is True  # unknown != critical
-    assert score.metadata["components"]["penalties"] == 0
+    assert score.metadata["gate_passed"] is False
+    assert "unknown_penalty_fired" in score.metadata["failed_conditions"]
+    assert score.metadata["components"]["penalties"] == 0  # no resolvable weight applied
     assert "not_a_declared_penalty" in score.metadata["unknown_penalties"]
+    assert score.value == 0.0
+
+
+def test_typod_critical_penalty_name_still_closes_the_gate(
+    scoring_attempt: AttemptState, scoring_meta: PuzzleMeta
+) -> None:
+    """META-TEST — prove the gate goes RED on the exact attack (Health-B eval-integrity HIGH):
+    a check.py that MEANT to fire the declared critical ``answer_key_fetch`` but typo'd it
+    (``answer_key_fetchh``) no longer silently scores a CLEAN solve. Before the fix the critical
+    veto was keyed only on RESOLVED declared penalties, so the typo'd name slipped the gate; now
+    any unresolved triggered name fails closed. The correctly-spelled control closes the gate via
+    ``critical_penalty`` — same outcome, so a one-character typo cannot disable the veto."""
+    typo = _clean_outcome(triggered_penalties=["answer_key_fetchh"])  # one extra 'h'
+    score = grade(scoring_attempt, scoring_meta, typo)
+    assert score.metadata["gate_passed"] is False
+    assert "unknown_penalty_fired" in score.metadata["failed_conditions"]
+    assert score.value == 0.0
+    # Control: the correctly-spelled critical penalty also closes the gate (via critical_penalty).
+    correct = _clean_outcome(triggered_penalties=["answer_key_fetch"])
+    control = grade(scoring_attempt, scoring_meta, correct)
+    assert control.metadata["gate_passed"] is False
+    assert "critical_penalty" in control.metadata["failed_conditions"]
 
 
 def test_critical_flavor_constant_is_adversarial() -> None:

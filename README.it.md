@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -82,7 +82,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Anteprima della ricerca (v0.3.x).** Il test alternativo ω del collegio giudicante è ancora un *modello circolare di giuria basato sul bootstrap*: per convalidarlo, è necessario un ciclo di **almeno 3 valutatori umani indipendenti** (il [test alternativo](https://arxiv.org/abs/2501.10970)), cosa che uno studio con un solo valutatore umano non può garantire; pertanto, questo ciclo è **sospeso a causa di vincoli strutturali, e non per negligenza**. I giudici in carica rimangono **provvisori**, il collegio giudicante si **amplia fino a includere un Claude Designer** quando non si raggiunge il quorum e lo strumento rivela questa situazione anziché simulare una base umana. Consultare la [scheda dei risultati](SCORECARD.md) per i risultati onesti e privi di elementi puramente estetici.
+**Strumenti di controllo della qualità degli strumenti utilizzabili offline:** non richiedono modelli o GPU e funzionano partendo da un report di esecuzione consolidato:
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+> **Anteprima della ricerca (v0.4.x).** Il test alternativo ω del collegio giudicante è ancora un *modello circolare di giuria basato sul bootstrap*: per convalidarlo, è necessario un ciclo di **almeno 3 valutatori umani indipendenti** (il [test alternativo](https://arxiv.org/abs/2501.10970)), cosa che uno studio con un solo valutatore umano non può garantire; pertanto, questo ciclo è **sospeso a causa di vincoli strutturali, e non per negligenza**. I giudici in carica rimangono **provvisori**, il collegio giudicante si **amplia fino a includere un Claude Designer** quando non si raggiunge il quorum e lo strumento rivela questa situazione anziché simulare una base umana. Consultare la [scheda dei risultati](SCORECARD.md) per i risultati onesti e privi di elementi puramente estetici.
 
 ## Guida rapida (dal codice sorgente)
 
@@ -101,6 +112,12 @@ uv run ruff check .
 # One command: lint + tests + build + smoke
 bash verify.sh
 ```
+
+## Valutazione inter-famiglia
+
+La prima **esecuzione pubblicata** per la valutazione inter-famiglia è disponibile in [`eval/RESULTS.md`](eval/RESULTS.md) (insieme al file `eval/panel.json` e al report di caratterizzazione). Sono state valutate sette famiglie distinte: due locali (gemma4, granite4.1) e cinque endpoint OpenRouter predefiniti (deepseek, cohere, meta-llama, qwen, nvidia), utilizzando 93 coppie di dati per la calibrazione con k=3: 1.395 chiamate a pagamento senza **nessun caso di superamento del limite di richieste**.
+
+**Il risultato reale:** il pool ora **include 3 famiglie distinte** (rispetto alle 2 iniziali, che erano solo locali), e un nuovo valutatore inter-famiglia funziona correttamente; tuttavia, il gruppo *indipendente* rimane composto da **2 membri** (il terzo è stato escluso per evitare ridondanza di errori, ρ≈1.0), il che è **inferiore al quorum**, quindi il gruppo **passa all'utilizzo di Claude Designer** invece di prendere una decisione automatica. Il collo di bottiglia si è rivelato essere l'**asse ω del test alternativo non validato, e non la qualità dei valutatori**: quattro valutatori affidabili (accuratezza 0,91–0,96) sono stati valutati *esclusivamente* sul modello circolare-giuria ω. "3 accettati" rappresenta un vero passo avanti; **non** significa che il problema di ω è stato risolto. ω rimane in fase di test, i membri del gruppo rimangono provvisori e la valutazione definitiva viene rinviata: questo è trasparente, non simulato.
 
 ## Documentazione
 

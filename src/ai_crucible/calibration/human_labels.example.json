@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "annotators": {
+    "annotator-1": {
+      "tier": "expert"
+    },
+    "annotator-2": {
+      "tier": "expert"
+    },
+    "annotator-3": {
+      "tier": "expert"
+    }
+  },
+  "labels": {
+    "pair-00-add": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-01-cap": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-02-rev": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-03-mult": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-04-even": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-05-div": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-06-avgspeed": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-07-listcomp": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-08-loop": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-09-pct": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-10-range5": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-11-syll1": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-12-unitkm": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-13-frac": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-14-primecount": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-15-grounded": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "unsure"
+    },
+    "pair-16-median": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-17-area": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-18-daysweek": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-19-strlen": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-20-compare": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-21-modulo": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-22-sumlist": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-23-boollogic": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-24-indexing": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-25-avg3": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-26-conv_hr": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-27-syll_some": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    },
+    "pair-28-syll_mid": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-29-buried_offby1": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "A"
+    },
+    "pair-30-fabricated_among_real": {
+      "annotator-1": "A",
+      "annotator-2": "A",
+      "annotator-3": "A"
+    },
+    "pair-31-compound": {
+      "annotator-1": "B",
+      "annotator-2": "B",
+      "annotator-3": "B"
+    }
+  }
+}

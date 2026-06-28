@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -82,7 +82,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-**リサーチプレビュー（v0.3.x）。** 審査員団による代替テストωは、依然として*循環モデル・陪審員ブートストラップ*であり、その妥当性を検証するには、**3人以上の独立した人間アノテーター**が必要（[alt-test](https://arxiv.org/abs/2501.10970)を参照）。単独の人間によるスタジオでは対応できないため、この段階は**構造的な制約により一時停止されており、放置されているわけではない**。審査員は**仮の状態**を保ち、構成された審査団は定足数に達しない場合、**Claude Designerに移行**し、そのツールは人間の判断を偽装するのではなく、その状況を開示する。正直で、見かけ倒しの結果ではないゲートの結果については、[スコアカード](SCORECARD.md)を参照のこと。
+**オフラインでの高品質な評価ツール**：モデルやGPUは不要で、確定された実行レポートから動作します。
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+**リサーチプレビュー（v0.4.x）。** 審査員団による代替テストωは、依然として*循環モデル・陪審員ブートストラップ*であり、その妥当性を検証するには、**3人以上の独立した人間アノテーター**が必要（[alt-test](https://arxiv.org/abs/2501.10970)を参照）。単独の人間によるスタジオでは対応できないため、この段階は**構造的な制約により一時停止されており、放置されているわけではない**。審査員は**仮の状態**を保ち、構成された審査団は定足数に達しない場合、**Claude Designerに移行**し、そのツールは人間の判断を偽装するのではなく、その状況を開示する。正直で、見かけ倒しの結果ではないゲートの結果については、[スコアカード](SCORECARD.md)を参照のこと。
 
 ## クイックスタート（ソースから）
 
@@ -101,6 +112,12 @@ uv run ruff check .
 # One command: lint + tests + build + smoke
 bash verify.sh
 ```
+
+## クロスファミリー評価
+
+最初の**公開された**クロスファミリーの審査員による合否判定の実行結果は、[`eval/RESULTS.md`](eval/RESULTS.md)（確定された`eval/panel.json`と特性レポートとともに）に保存されています。7つの異なるファミリー（ローカルの2つ：gemma4、granite4.1、および固定されたOpenRouterのエンドポイント5つ：deepseek、cohere、meta-llama、qwen、nvidia）について、k=3で93組のキャリブレーションペアを用いて評価が行われました。その結果、1,395回の有料呼び出しが**レート制限による中断なしに**実行されました。
+
+**正直な結果：**現在、このシステムは**3つの異なるファミリーを承認**するようになり（以前はローカルのみの2つ）、真に新しいクロスファミリーの審査員がスムーズに参加できるようになりました。ただし、構成された*独立した*審査員の数は依然として**2人**であり（エラーの冗長性を考慮して3人目は除外され、ρ≈1.0）、これは**必要な人数を下回る**ため、審査員は自動的に決定するのではなく、**Claude Designerにエスカレーション**します。ボトルネックは、**未検証の代替テストω軸であり、審査員の品質ではありませんでした**。4人の優れた審査員（正答率0.91〜0.96）が、*循環モデル・陪審員ωのみに基づいて*評価されました。「3つの承認」は実際の進歩です。これは「ωの問題が解決した」わけではありません。ωは引き続き保留され、審査員の席は仮の状態のままであり、最終的な決定は延期されます。ただし、これは明らかにされており、偽りはありません。
 
 ## ドキュメント
 

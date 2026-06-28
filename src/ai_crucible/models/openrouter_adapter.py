@@ -59,6 +59,7 @@ from ai_crucible.models.ollama_adapter import (
     _first_token_logprob,
     _item_id,
     _logprob_to_probability,
+    _normalize_harmony,
 )
 from ai_crucible.scoring.judge_panel import JudgeFn
 from ai_crucible.types import AttemptState, Score
@@ -219,8 +220,12 @@ def _is_transient_openrouter(exc: BaseException) -> bool:
     """Is ``exc`` a transient OpenRouter call failure worth retrying (§8.6)?
 
     Retryable: :class:`OpenRouterUnreachableError`, the underlying httpx connect/read/protocol
-    errors, and a 5xx ``HTTPStatusError``. NOT retryable: a 4xx (a request error retrying won't
-    fix), a :class:`ModelMismatchError` (a provenance breach the andon must see), or an
+    errors, a **429 rate limit**, and a 5xx ``HTTPStatusError``. A 429 is the *expected*
+    transient on OpenRouter's shared free pool (and under a sustained panel run's parallel
+    cross-family calls) — the bounded backoff exists to absorb it, so treating it as fatal would
+    drop a whole model's run on a momentary burst (the exact rate-limit-as-fatal gap the Claude
+    adapter shares). NOT retryable: any other 4xx (a request error retrying won't fix), a
+    :class:`ModelMismatchError` (a provenance breach the andon must see), or an
     :class:`OpenRouterBadResponseError` (a shape problem, not a blip). httpx is imported lazily so
     the module still imports without it.
     """
@@ -244,7 +249,8 @@ def _is_transient_openrouter(exc: BaseException) -> bool:
     ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
-        return 500 <= exc.response.status_code < 600
+        status = exc.response.status_code
+        return status == 429 or 500 <= status < 600
     return False
 
 
@@ -255,6 +261,14 @@ def _extract_text(response: dict[str, Any]) -> str:
     completion is a legitimate (if unhelpful) answer the caller scores, matching the Ollama
     adapter's graceful contract (never raises on a shape gap; the served-match + transport guards
     live elsewhere).
+
+    The content is normalized through the SHARED :func:`~ai_crucible.models.ollama_adapter.
+    _normalize_harmony` (identity pass-through for clean text), so a gpt-oss model served via
+    OpenRouter that leaks OpenAI **Harmony** chat-template control tokens (``<|channel|>analysis
+    <|message|>…``) into ``content`` is collapsed to its final-channel answer BEFORE the judge /
+    solver-loop parser sees it — the same defense the Ollama adapter already applies (the OpenAI
+    family is reachable on this gateway, so the leak the Ollama path hit is reachable here too).
+    A deepseek/qwen/cohere response carries no Harmony tokens and is returned unchanged.
     """
     choices = response.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
@@ -262,7 +276,7 @@ def _extract_text(response: dict[str, Any]) -> str:
         if isinstance(message, dict):
             content = message.get("content")
             if isinstance(content, str):
-                return content
+                return _normalize_harmony(content)
     return ""
 
 
