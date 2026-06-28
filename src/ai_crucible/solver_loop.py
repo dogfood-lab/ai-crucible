@@ -75,6 +75,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from ai_crucible.budget import BudgetExceeded
 from ai_crucible.roles import GenerateFn, Solver
 from ai_crucible.types import AttemptState
 
@@ -508,9 +509,15 @@ async def _execute(solver: Solver, tool: str, args: dict[str, Any]) -> str:
     happens first, §8.4); this only runs the side effect and returns the observation
     text. A tool-side failure (a path that escapes the workdir → ``PermissionError``,
     a missing file → ``FileNotFoundError``) is turned into an observation string the
-    model can react to — it is the environment's answer, not an attempt-fatal error
-    (a BudgetExceeded, by contrast, is raised by record_tool_call BEFORE this runs and
-    never reaches here, so it always propagates).
+    model can react to — it is the environment's answer, not an attempt-fatal error.
+
+    A :class:`~ai_crucible.budget.BudgetExceeded`, by contrast, is an ANDON breach and must
+    HALT the attempt — it is re-raised, never swallowed into an observation. Two sources
+    raise it: ``record_tool_call`` (BEFORE this runs, by the caller) AND the sandbox adapter's
+    own per-call wall-clock kill, which raises it from INSIDE ``tools.exec`` here. The earlier
+    code caught the latter in the broad ``except`` and turned a runaway-command timeout into a
+    benign observation, defeating the per-call ANDON; the explicit re-raise restores it so a
+    sandbox timeout stamps ``terminated_by=TIME`` like every other breach.
     """
     tools = solver.tools
     try:
@@ -521,6 +528,8 @@ async def _execute(solver: Solver, tool: str, args: dict[str, Any]) -> str:
         if tool == _WRITE:
             await tools.write_file(args["path"], args["content"])
             return f"wrote {args['path']}"
+    except BudgetExceeded:
+        raise  # ANDON breach (e.g. sandbox per-call timeout) — halt, do not observe.
     except Exception as exc:  # noqa: BLE001 — surface as an observation, not a crash.
         return f"ERROR: {type(exc).__name__}: {exc}"
     return f"ERROR: unknown tool {tool!r}"

@@ -35,6 +35,7 @@ Standards compliance (the six — workflow-standards.md):
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from typing import Any
 
@@ -119,16 +120,19 @@ def _stringify(value: Any) -> list[str]:
 def _chrome_tokens(chrome: Chrome) -> list[str]:
     """Every non-empty string token a chrome object could leak as.
 
-    A field at its dataclass default (``rank=None``, empty ``leaderboard``/
-    ``catalog_standing``) contributes nothing — only chrome that was actually
-    populated can trip the guard, so a benign empty Chrome never blocks a clean
-    context.
+    Field-AGNOSTIC by construction: it walks EVERY dataclass field of ``chrome``
+    (``dataclasses.fields``), not a hand-maintained allow-list. The ``Chrome`` docstring
+    already names ``prizes`` as a plausible future Tier-3 signal; a new field added there
+    must NOT be able to leak into scored context while the guard reports clean — the exact
+    silently-misleading result an eval-integrity instrument must never produce, and the
+    asymmetry with the already-field-agnostic :func:`_message_text` (which walks every
+    message value). A field at its default (``rank=None``, empty ``leaderboard``/
+    ``catalog_standing``) contributes nothing — only chrome that was actually populated can
+    trip the guard, so a benign empty Chrome never blocks a clean context.
     """
     tokens: list[str] = []
-    tokens.extend(_stringify(chrome.rank))
-    tokens.extend(_stringify(chrome.cohort_size))
-    tokens.extend(_stringify(chrome.leaderboard))
-    tokens.extend(_stringify(chrome.catalog_standing))
+    for field in dataclasses.fields(chrome):
+        tokens.extend(_stringify(getattr(chrome, field.name)))
     return tokens
 
 

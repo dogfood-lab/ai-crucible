@@ -27,6 +27,8 @@ from ai_crucible.models import OpenRouterModel, is_openrouter_spec
 from ai_crucible.models.ollama_adapter import ModelMismatchError
 from ai_crucible.models.openrouter_adapter import (
     OpenRouterBadResponseError,
+    OpenRouterUnreachableError,
+    _is_transient_openrouter,
     _norm_openrouter,
 )
 from ai_crucible.scoring.judge_panel import judge_family
@@ -232,6 +234,35 @@ def test_no_warning_for_unknown_vendor_or_family() -> None:
         warnings.simplefilter("error")
         OpenRouterModel("openrouter:somevendor/some-model", family="whatever")
         OpenRouterModel("openrouter:deepseek/deepseek-chat", family="")  # seated placeholder
+
+
+# --------------------------------------------------------------------------- #
+# §8.6 transient classifier — 429 rate-limit is retryable (the rate-limit-as-fatal fix)
+# --------------------------------------------------------------------------- #
+
+
+def test_is_transient_openrouter_retries_429_and_5xx_not_other_4xx() -> None:
+    """A 429 rate limit is a TRANSIENT the bounded backoff must absorb — OpenRouter's shared
+    free pool 429s constantly, and a panel run's parallel calls hit per-minute limits — so a
+    429 must NOT abort the whole model's run. A 5xx stays transient; any OTHER 4xx (400/401/404)
+    is not (retrying won't help). Shape/provenance errors are never transient."""
+    import httpx
+
+    def status_err(code: int) -> httpx.HTTPStatusError:
+        req = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+        resp = httpx.Response(code, request=req)
+        return httpx.HTTPStatusError(str(code), request=req, response=resp)
+
+    assert _is_transient_openrouter(status_err(429)) is True  # the fix: was non-retryable
+    assert _is_transient_openrouter(status_err(503)) is True
+    assert _is_transient_openrouter(status_err(500)) is True
+    assert _is_transient_openrouter(status_err(400)) is False
+    assert _is_transient_openrouter(status_err(401)) is False
+    assert _is_transient_openrouter(status_err(404)) is False
+    # the structured unreachable error is transient; shape/provenance breaches are not.
+    assert _is_transient_openrouter(OpenRouterUnreachableError("base", "m")) is True
+    assert _is_transient_openrouter(OpenRouterBadResponseError("m", "base", "bad")) is False
+    assert _is_transient_openrouter(ModelMismatchError("a", "b")) is False
 
 
 # --------------------------------------------------------------------------- #

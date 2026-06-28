@@ -90,14 +90,16 @@ _DEFAULT_RETRY_BACKOFF_BASE = 0.5
 def _is_transient_claude(exc: BaseException) -> bool:
     """Is ``exc`` a transient Anthropic call failure worth retrying (§8.6)?
 
-    Retryable: a connection error, a request timeout, or a 5xx from the API — the
-    Anthropic SDK exposes these as ``APIConnectionError`` / ``APITimeoutError`` /
-    ``InternalServerError`` (and ``APIStatusError`` with a 5xx ``status_code``). NOT
-    retryable: a 4xx (``BadRequestError`` / ``AuthenticationError`` / etc. — retrying
-    won't help) or a :class:`ModelMismatchError` (a provenance breach the andon must see).
-    The ``anthropic`` SDK is imported lazily so the module still imports without it; with
-    no SDK installed, only :class:`ModelMismatchError` exclusion applies and nothing else
-    is treated as transient.
+    Retryable: a connection error, a request timeout, a **429 rate limit**, or a 5xx (incl.
+    Anthropic's 529 Overloaded) — the SDK exposes these as ``APIConnectionError`` /
+    ``APITimeoutError`` / ``RateLimitError`` (429) / ``InternalServerError`` (and any
+    ``APIStatusError`` whose ``status_code`` is 429 or 5xx). A 429 under sustained load is the
+    *expected* transient the bounded backoff exists to absorb — treating it as fatal aborts a
+    long characterization/solver run on a momentary rate-limit burst. NOT retryable: any other
+    4xx (``BadRequestError`` / ``AuthenticationError`` / etc. — retrying won't help) or a
+    :class:`ModelMismatchError` (a provenance breach the andon must see). The ``anthropic`` SDK
+    is imported lazily so the module still imports without it; with no SDK installed, only
+    :class:`ModelMismatchError` exclusion applies and nothing else is treated as transient.
     """
     if isinstance(exc, ModelMismatchError):
         return False
@@ -109,7 +111,7 @@ def _is_transient_claude(exc: BaseException) -> bool:
         return True
     if isinstance(exc, anthropic.APIStatusError):
         status = getattr(exc, "status_code", None)
-        return isinstance(status, int) and 500 <= status < 600
+        return isinstance(status, int) and (status == 429 or 500 <= status < 600)
     return False
 
 

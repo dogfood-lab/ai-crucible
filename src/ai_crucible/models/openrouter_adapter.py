@@ -219,8 +219,12 @@ def _is_transient_openrouter(exc: BaseException) -> bool:
     """Is ``exc`` a transient OpenRouter call failure worth retrying (§8.6)?
 
     Retryable: :class:`OpenRouterUnreachableError`, the underlying httpx connect/read/protocol
-    errors, and a 5xx ``HTTPStatusError``. NOT retryable: a 4xx (a request error retrying won't
-    fix), a :class:`ModelMismatchError` (a provenance breach the andon must see), or an
+    errors, a **429 rate limit**, and a 5xx ``HTTPStatusError``. A 429 is the *expected*
+    transient on OpenRouter's shared free pool (and under a sustained panel run's parallel
+    cross-family calls) — the bounded backoff exists to absorb it, so treating it as fatal would
+    drop a whole model's run on a momentary burst (the exact rate-limit-as-fatal gap the Claude
+    adapter shares). NOT retryable: any other 4xx (a request error retrying won't fix), a
+    :class:`ModelMismatchError` (a provenance breach the andon must see), or an
     :class:`OpenRouterBadResponseError` (a shape problem, not a blip). httpx is imported lazily so
     the module still imports without it.
     """
@@ -244,7 +248,8 @@ def _is_transient_openrouter(exc: BaseException) -> bool:
     ):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
-        return 500 <= exc.response.status_code < 600
+        status = exc.response.status_code
+        return status == 429 or 500 <= status < 600
     return False
 
 

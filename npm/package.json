@@ -17,7 +17,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "verify": "node -e \"require('./bin/ai-crucible.js')\" 2>&1 || true"
+    "verify": "node -e \"require('./bin/ai-crucible.js')\" 2>&1 || true",
+    "test": "node test/version-derive.test.js"
   },
   "keywords": [
     "llm",

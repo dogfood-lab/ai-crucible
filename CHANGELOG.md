@@ -29,6 +29,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     or a refusal. The operator's `@family` stays the authoritative axis — consistent with the
     trusting Ollama path.
 
+### Fixed
+- **Eval-integrity: the answer-key bait penalty was evadable (CRITICAL).** The grading host detected
+  a sealed-answer-key touch only when the Solver read it via an allowlisted command
+  (`grep`/`cat`/…); a read via any other command (`od`/`xxd`/`strings`/`python3 -c`/`cp`/`dd`) touched
+  the bait without registering, so a fabricated-but-correct answer could pass the §8.3 gate CLEAN. The
+  runner now emits a deny-by-default `touched_paths` set (path operands of EVERY exec) that the
+  bait/oracle guard keys on, while grounded-read stays allowlist-gated. Closed across 6 evasion vectors
+  end-to-end and cross-family verified. (The residual — shell-glob / computed-path reads — is
+  documented and deferred to a host-side filesystem access tripwire.)
+- **Judge admission: the Wilson interval was fed a fabricated count (HIGH).** The seat gate built its
+  accuracy confidence interval from `round(difficulty_weighted_accuracy × n_items)` — a fictional
+  binomial count that understated uncertainty (a chance-level judge whose few heavy items happened to
+  be right could clear the REJECT floor). It now uses the Kish effective sample size
+  `n_eff = (Σw)²/Σw²` (a no-op on uniformly-weighted sets), restoring a sound small-N admissibility
+  bound.
+- **npm launcher shipped a stale version (HIGH).** `npx @dogfood-lab/ai-crucible` derived its release
+  asset names from a hardcoded `0.2.0` in the bin, so the published 0.3.0 package fetched 0.2.0
+  binaries; the launcher now derives version + tag from `package.json` at runtime (cannot drift).
+- **Rate-limit (429) was treated as fatal in the model adapters.** The OpenRouter and Claude transient
+  classifiers retried 5xx but not 429, so a momentary rate-limit burst aborted a long panel/solver run
+  instead of being absorbed by the bounded backoff. 429 (and Anthropic 529 Overloaded) is now retried.
+- **The sealed-boundary chrome scan was not field-agnostic.** `_chrome_tokens` hard-coded four fields,
+  so a future Tier-3 chrome field could leak into scored context while the guard reported clean; it now
+  walks `dataclasses.fields`, mirroring the already-field-agnostic message scan.
+- **A sandbox per-call timeout was swallowed by the solver loop.** A `BudgetExceeded(TIME)` raised by
+  the sandbox adapter inside `_execute` was caught by the broad observation handler; it now propagates
+  so a runaway command halts the attempt with `terminated_by=TIME`.
+- **perturbation_audit jittered two thresholds the decision never reads** (`consistency_floor`,
+  `bias_ceiling`), padding the flip-rate denominator and deflating the gate-fragility andon signal; the
+  perturbed set now equals the decision-relevant threshold set.
+
 ## [0.3.0] — 2026-06-21
 
 Dogfood-swarm: hardening + the first runnable diagnostic cycle + the durable catalog +
