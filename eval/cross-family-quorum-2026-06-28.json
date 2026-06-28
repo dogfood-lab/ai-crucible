@@ -1,0 +1,690 @@
+{
+  "n_items": 93,
+  "k": 3,
+  "item_set": "admission_pairs.json",
+  "attempted_panel": [
+    "gemma4:31b",
+    "granite4.1:30b",
+    "openrouter:deepseek/deepseek-v3.2",
+    "openrouter:cohere/command-a-03-2025",
+    "openrouter:meta-llama/llama-3.3-70b-instruct",
+    "openrouter:qwen/qwen3.7-plus",
+    "openrouter:nvidia/nemotron-3-super-120b-a12b"
+  ],
+  "failed_models": [],
+  "degraded": false,
+  "alt_test_reference": "model-jury-bootstrap",
+  "alt_test_caveat": "alt-test \u03c9 is a MODEL-JURY BOOTSTRAP (a documented director decision). The reference 'annotators' are the other panel models, drawn from the SAME population being seated, so \u03c9 is CIRCULAR. A valid alt-test needs >=3 HUMAN annotators on >=30 items (Calderon, Reichart & Dror 2025, arXiv:2501.10970). Here \u03c9 functions as an OUTLIER DETECTOR (a judge that agrees with its peers no worse than peers agree with each other), NOT a substitution guarantee. Seat decisions are PROVISIONAL until human labels exist (\u00a712 Q3).",
+  "kappa_baseline": {
+    "value": 0.8,
+    "provisional": true,
+    "alt_test_reference": "model-jury-bootstrap",
+    "source": "hardcoded default \u2014 NOT human-estimated; the \u03ba one-sided floor and \u03ba-z gates (which can SEAT or REJECT a judge) are PROVISIONAL until --human-labels supplies a measured human\u2013human Krippendorff \u03b1 (\u00a712 Q3)"
+  },
+  "human_alt_test": null,
+  "profiles": {
+    "gemma4:31b": {
+      "model_id": "gemma4:31b",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.9846182704933409,
+      "agreement_r": 0.9786843869459148,
+      "kappa_z": 4.302448775925976,
+      "alt_test_omega": 0.6666666666666666,
+      "consistency": 1.0,
+      "ece": 0.010752463853485383,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.985914451330445,
+      "seat_decision": "seat",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.985 (\u2265 target); Wilson-95 lower 0.935 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.979 (\u2265 0.80); \u03ba=0.978 (\u2265 one-sided floor 0.719); z vs human +4.30 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.978 sits z=+4.30 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.667 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (\u2265 0.50 \u2192 seat-eligible)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE 0.011 (within 0.15 soft ceiling \u2192 ok)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.986 (CI [0.961, 0.993]) vs floor 0.55",
+        "DECISION: SEAT \u2014 hard gates pass and quality-score CI clears the floor (review_flag set: super-consistent, Tier-1B \u2014 SEATED, not screened)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.934864193319676,
+        "difficulty_weighted_accuracy": 0.9846182704933409,
+        "kappa": 0.9784572619874914,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.985914451330445,
+        "score_ci": [
+          0.9610374127436123,
+          0.9925403273697202
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "granite4.1:30b": {
+      "model_id": "granite4.1:30b",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.9602326017632713,
+      "agreement_r": 0.9138888888888894,
+      "kappa_z": 2.74576167500494,
+      "alt_test_omega": 0.3333333333333333,
+      "consistency": 1.0,
+      "ece": 0.04401764349579932,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.4771414837741512,
+      "seat_decision": "screen",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.960 (\u2265 target); Wilson-95 lower 0.899 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.914 (\u2265 0.80); \u03ba=0.914 (\u2265 one-sided floor 0.719); z vs human +2.75 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.914 sits z=+2.75 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.333 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (< 0.50 \u2192 SCREEN-only)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE 0.044 (within 0.15 soft ceiling \u2192 ok)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.954 (CI [0.924, 0.968]) vs floor 0.55",
+        "DECISION: SCREEN \u2014 alt-test \u03c9<0.50 (substitution worse than a human, Calderon 2025)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.8990410702303961,
+        "difficulty_weighted_accuracy": 0.9602326017632713,
+        "kappa": 0.913888888888889,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.9542829675483024,
+        "score_ci": [
+          0.9236872017818649,
+          0.9679827650307942
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "openrouter:deepseek/deepseek-v3.2": {
+      "model_id": "openrouter:deepseek/deepseek-v3.2",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.9138373038204215,
+      "agreement_r": 0.8648511315103876,
+      "kappa_z": 1.3456256875804111,
+      "alt_test_omega": 0.0,
+      "consistency": 0.935483870967742,
+      "ece": 0.22971342435435133,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.41838451999294823,
+      "seat_decision": "screen",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.914 (\u2265 target); Wilson-95 lower 0.836 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.865 (\u2265 0.80); \u03ba=0.856 (\u2265 one-sided floor 0.719); z vs human +1.35 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.856 sits z=+1.35 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.000 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (< 0.50 \u2192 SCREEN-only)",
+        "consistency 0.935 (\u2265 0.80 test-retest floor)",
+        "ECE 0.230 (over 0.15 soft ceiling \u2192 down-weight)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.837 (CI [0.801, 0.857]) vs floor 0.55",
+        "DECISION: SCREEN \u2014 alt-test \u03c9<0.50 (substitution worse than a human, Calderon 2025)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.8360047054138369,
+        "difficulty_weighted_accuracy": 0.9138373038204215,
+        "kappa": 0.8558139534883721,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.8367690399858965,
+        "score_ci": [
+          0.800725865634736,
+          0.8574733115315124
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "openrouter:cohere/command-a-03-2025": {
+      "model_id": "openrouter:cohere/command-a-03-2025",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.927030575876946,
+      "agreement_r": 0.8737371392431524,
+      "kappa_z": 1.6990554613727098,
+      "alt_test_omega": 0.3333333333333333,
+      "consistency": 1.0,
+      "ece": null,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.4628182148557094,
+      "seat_decision": "screen",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.927 (\u2265 target); Wilson-95 lower 0.851 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.874 (\u2265 0.80); \u03ba=0.870 (\u2265 one-sided floor 0.719); z vs human +1.70 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.870 sits z=+1.70 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.333 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (< 0.50 \u2192 SCREEN-only)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE not measured (no confidences) \u2014 no calibration penalty (\u00a712)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.926 (CI [0.888, 0.945]) vs floor 0.55",
+        "DECISION: SCREEN \u2014 alt-test \u03c9<0.50 (substitution worse than a human, Calderon 2025)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.8511321390822681,
+        "difficulty_weighted_accuracy": 0.927030575876946,
+        "kappa": 0.8704735376044567,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.9256364297114188,
+        "score_ci": [
+          0.8876872113140797,
+          0.9453459940114493
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "openrouter:meta-llama/llama-3.3-70b-instruct": {
+      "model_id": "openrouter:meta-llama/llama-3.3-70b-instruct",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.9269680485212282,
+      "agreement_r": 0.8841835433337796,
+      "kappa_z": 1.8691156715473194,
+      "alt_test_omega": 0.3333333333333333,
+      "consistency": 0.956989247311828,
+      "ece": 0.09321839998145295,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.4600684683615568,
+      "seat_decision": "screen",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.927 (\u2265 target); Wilson-95 lower 0.851 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.884 (\u2265 0.80); \u03ba=0.878 (\u2265 one-sided floor 0.719); z vs human +1.87 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.878 sits z=+1.87 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.333 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (< 0.50 \u2192 SCREEN-only)",
+        "consistency 0.957 (\u2265 0.80 test-retest floor)",
+        "ECE 0.093 (within 0.15 soft ceiling \u2192 ok)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.920 (CI [0.882, 0.940]) vs floor 0.55",
+        "DECISION: SCREEN \u2014 alt-test \u03c9<0.50 (substitution worse than a human, Calderon 2025)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.8511321390822681,
+        "difficulty_weighted_accuracy": 0.9269680485212282,
+        "kappa": 0.8775273065303276,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.9201369367231136,
+        "score_ci": [
+          0.8822189820036335,
+          0.939877764701003
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "openrouter:qwen/qwen3.7-plus": {
+      "model_id": "openrouter:qwen/qwen3.7-plus",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 1.0,
+      "agreement_r": 1.0,
+      "kappa_z": 4.8218253804964775,
+      "alt_test_omega": 1.0,
+      "consistency": 1.0,
+      "ece": 4.2750748096231916e-05,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 1.0,
+      "seat_decision": "seat",
+      "notes": [
+        "accuracy (difficulty-weighted) 1.000 (\u2265 target); Wilson-95 lower 0.956 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=1.000 (\u2265 0.80); \u03ba=1.000 (\u2265 one-sided floor 0.719); z vs human +4.82 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=1.000 sits z=+4.82 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=1.000 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (\u2265 0.50 \u2192 seat-eligible)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE 0.000 (within 0.15 soft ceiling \u2192 ok)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 1.000 (CI [0.978, 1.000]) vs floor 0.55",
+        "DECISION: SEAT \u2014 hard gates pass and quality-score CI clears the floor (review_flag set: super-consistent, Tier-1B \u2014 SEATED, not screened)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.9557646903580262,
+        "difficulty_weighted_accuracy": 1.0,
+        "kappa": 1.0,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 1.0,
+        "score_ci": [
+          0.9778823451790131,
+          1.0
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    },
+    "openrouter:nvidia/nemotron-3-super-120b-a12b": {
+      "model_id": "openrouter:nvidia/nemotron-3-super-120b-a12b",
+      "role": "judge",
+      "n_items": 279,
+      "quant": null,
+      "objective_accuracy": 0.9846182704933409,
+      "agreement_r": 0.9786843869459148,
+      "kappa_z": 4.302448775925976,
+      "alt_test_omega": 0.6666666666666666,
+      "consistency": 1.0,
+      "ece": 7.909684867080102e-07,
+      "position_bias": null,
+      "verbosity_bias": null,
+      "family_pref_delta": null,
+      "reliability_weight": 0.985914451330445,
+      "seat_decision": "seat",
+      "notes": [
+        "accuracy (difficulty-weighted) 0.985 (\u2265 target); Wilson-95 lower 0.935 > 0.50 \u2192 real margin over chance \u2713",
+        "agreement r=0.979 (\u2265 0.80); \u03ba=0.978 (\u2265 one-sided floor 0.719); z vs human +4.30 (SUPER-consistent \u2192 review-flag (Tier-1B, SEATED))",
+        "review_flag SET \u2014 \u03ba=0.978 sits z=+4.30 above the human baseline (Han 2025 Tier-1B: super-consistent judges are TOP-ranked and SEATED). Flagged for later human review only IF \u03ba\u22481.0 co-occurs with high human disagreement on the same items \u2014 NOT screened.",
+        "alt-test \u03c9=0.667 [model-jury PROXY (CIRCULAR; not a substitution guarantee)] (\u2265 0.50 \u2192 seat-eligible)",
+        "consistency 1.000 (\u2265 0.80 test-retest floor)",
+        "ECE 0.000 (within 0.15 soft ceiling \u2192 ok)",
+        "bias not measured (no position-swap / verbosity / family trials staged) \u2014 no bias penalty (the default run stages no bias trials)",
+        "quality_score 0.986 (CI [0.961, 0.993]) vs floor 0.55",
+        "DECISION: SEAT \u2014 hard gates pass and quality-score CI clears the floor (review_flag set: super-consistent, Tier-1B \u2014 SEATED, not screened)"
+      ],
+      "metadata": {
+        "human_human_kappa": 0.8,
+        "accuracy_wilson_lower": 0.934864193319676,
+        "difficulty_weighted_accuracy": 0.9846182704933409,
+        "kappa": 0.9784572619874914,
+        "kappa_one_sided_floor": 0.7187029871331347,
+        "quality_score": 0.985914451330445,
+        "score_ci": [
+          0.9610374127436123,
+          0.9925403273697202
+        ],
+        "review_flag": true,
+        "thresholds": {
+          "accuracy_floor": 0.5,
+          "accuracy_target": 0.6,
+          "agreement_r": 0.8,
+          "kappa_floor_margin": null,
+          "kappa_z_review": 1.0,
+          "quality_floor": 0.55,
+          "alt_test_omega": 0.5,
+          "consistency_floor": 0.8,
+          "bias_ceiling": 0.25,
+          "ece_soft_ceiling": 0.15
+        },
+        "review_reason": "super-consistent (\u03ba z above the human baseline; Han 2025 Tier-1B) \u2014 human review only IF \u03ba\u22481.0 co-occurs with high human disagreement",
+        "n_unparsed": 0,
+        "parse_failure_rate": 0.0,
+        "dropped_items": 0
+      }
+    }
+  },
+  "known_groups": {
+    "trivial_item_count": 13,
+    "violations": [
+      "granite4.1:30b missed trivial items: ['code-07-dict-insertion-order']"
+    ],
+    "passed": false
+  },
+  "panel_correlation": {
+    "pairwise_error_correlation": {
+      "gemma4:31b|granite4.1:30b": 0.0,
+      "gemma4:31b|openrouter:cohere/command-a-03-2025": -0.0179,
+      "gemma4:31b|openrouter:deepseek/deepseek-v3.2": 0.4236,
+      "gemma4:31b|openrouter:meta-llama/llama-3.3-70b-instruct": -0.0291,
+      "gemma4:31b|openrouter:nvidia/nemotron-3-super-120b-a12b": 1.0,
+      "gemma4:31b|openrouter:qwen/qwen3.7-plus": 0.0,
+      "granite4.1:30b|openrouter:cohere/command-a-03-2025": 0.4142,
+      "granite4.1:30b|openrouter:deepseek/deepseek-v3.2": 0.2269,
+      "granite4.1:30b|openrouter:meta-llama/llama-3.3-70b-instruct": 0.2375,
+      "granite4.1:30b|openrouter:nvidia/nemotron-3-super-120b-a12b": 0.0,
+      "granite4.1:30b|openrouter:qwen/qwen3.7-plus": 0.0,
+      "openrouter:cohere/command-a-03-2025|openrouter:deepseek/deepseek-v3.2": 0.2594,
+      "openrouter:cohere/command-a-03-2025|openrouter:meta-llama/llama-3.3-70b-instruct": 0.4111,
+      "openrouter:cohere/command-a-03-2025|openrouter:nvidia/nemotron-3-super-120b-a12b": -0.0179,
+      "openrouter:cohere/command-a-03-2025|openrouter:qwen/qwen3.7-plus": 0.0,
+      "openrouter:deepseek/deepseek-v3.2|openrouter:meta-llama/llama-3.3-70b-instruct": 0.7268,
+      "openrouter:deepseek/deepseek-v3.2|openrouter:nvidia/nemotron-3-super-120b-a12b": 0.4236,
+      "openrouter:deepseek/deepseek-v3.2|openrouter:qwen/qwen3.7-plus": 0.0,
+      "openrouter:meta-llama/llama-3.3-70b-instruct|openrouter:nvidia/nemotron-3-super-120b-a12b": -0.0291,
+      "openrouter:meta-llama/llama-3.3-70b-instruct|openrouter:qwen/qwen3.7-plus": 0.0,
+      "openrouter:nvidia/nemotron-3-super-120b-a12b|openrouter:qwen/qwen3.7-plus": 0.0
+    },
+    "submodular": false
+  },
+  "irt_prune": {
+    "n_items": 93,
+    "kept_count": 11,
+    "dropped_count": 82,
+    "kept": [
+      "code-05-short-circuit-skips-call",
+      "pair-21-modulo",
+      "pair-41-buried_sign",
+      "pair-44-binsum",
+      "pair-45-setunion",
+      "pair-47-weighted",
+      "prec-03-and-over-or",
+      "prec-07-comparison-chaining",
+      "unit-02-area-square-scale",
+      "unit-04-speed-factor-slip",
+      "unit-06-rate-time-inverted"
+    ],
+    "dropped": [
+      "code-01-mutated-shared-default",
+      "code-02-alias-not-copy",
+      "code-03-floor-div-toward-neg-inf",
+      "code-04-slice-excludes-stop",
+      "code-06-late-binding-closure",
+      "code-07-dict-insertion-order",
+      "fact-01-capital-au",
+      "fact-02-author-swap",
+      "fact-03-element-w",
+      "fact-04-suez-year",
+      "fact-05-atomic-k",
+      "fact-06-chrono-order",
+      "fact-07-anchor-jp-capital",
+      "logic-01-affirm-consequent",
+      "logic-02-deny-antecedent",
+      "logic-03-converse-not-contrapositive",
+      "logic-04-quantifier-scope-swap",
+      "logic-05-vacuous-truth",
+      "logic-06-demorgan-negation",
+      "logic-07-modus-ponens-anchor",
+      "pair-00-add",
+      "pair-01-cap",
+      "pair-02-rev",
+      "pair-03-mult",
+      "pair-04-even",
+      "pair-05-div",
+      "pair-06-avgspeed",
+      "pair-07-listcomp",
+      "pair-08-loop",
+      "pair-09-pct",
+      "pair-10-range5",
+      "pair-11-syll1",
+      "pair-12-unitkm",
+      "pair-13-frac",
+      "pair-14-primecount",
+      "pair-15-grounded",
+      "pair-16-median",
+      "pair-17-area",
+      "pair-18-daysweek",
+      "pair-19-strlen",
+      "pair-20-compare",
+      "pair-22-sumlist",
+      "pair-23-boollogic",
+      "pair-24-indexing",
+      "pair-25-avg3",
+      "pair-26-conv_hr",
+      "pair-27-syll_some",
+      "pair-28-syll_mid",
+      "pair-29-buried_offby1",
+      "pair-30-fabricated_among_real",
+      "pair-31-compound",
+      "pair-32-rate_inverse",
+      "pair-33-neg_exp",
+      "pair-34-order_ops",
+      "pair-35-prob_and",
+      "pair-36-units_speed",
+      "pair-37-recursion",
+      "pair-38-gcd",
+      "pair-39-slope",
+      "pair-40-dedup",
+      "pair-42-ratio_scale",
+      "pair-43-leap",
+      "pair-46-trailingzero",
+      "pair-48-nested",
+      "pair-49-offby_loop",
+      "pair-50-decimal_mult",
+      "prec-01-mul-over-add",
+      "prec-02-not-binds-tighter",
+      "prec-04-exponent-right-assoc",
+      "prec-05-unary-minus-below-power",
+      "prec-06-comparison-below-bitwise",
+      "stat-01-base-rate",
+      "stat-02-cond-inversion",
+      "stat-03-simpson",
+      "stat-04-median-vs-mean",
+      "stat-05-prosecutor",
+      "stat-06-regression-mean",
+      "stat-07-die-prob",
+      "unit-01-fahrenheit-offset",
+      "unit-03-volume-cube-scale",
+      "unit-05-si-prefix-power",
+      "unit-07-km-to-m-anchor"
+    ],
+    "note": "ATLAS screen: drop zero-variance (saturated) or low-r_pb items"
+  },
+  "perturbation": {
+    "max_flip_rate": 0.0,
+    "by_model": {
+      "gemma4:31b": {
+        "baseline_decision": "seat",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "granite4.1:30b": {
+        "baseline_decision": "screen",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "openrouter:deepseek/deepseek-v3.2": {
+        "baseline_decision": "screen",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "openrouter:cohere/command-a-03-2025": {
+        "baseline_decision": "screen",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "openrouter:meta-llama/llama-3.3-70b-instruct": {
+        "baseline_decision": "screen",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "openrouter:qwen/qwen3.7-plus": {
+        "baseline_decision": "seat",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      },
+      "openrouter:nvidia/nemotron-3-super-120b-a12b": {
+        "baseline_decision": "seat",
+        "flip_rate": 0.0,
+        "n_perturbations": 12,
+        "flips": []
+      }
+    },
+    "andon": "high max_flip_rate \u2192 gate sits within threshold noise; decisions not yet robust"
+  },
+  "calibration": {
+    "by_model": {
+      "gemma4:31b": {
+        "mean_temperature": 2.7658,
+        "ece_raw": 0.0108,
+        "ece_cv": 0.0001
+      },
+      "granite4.1:30b": {
+        "mean_temperature": 4.3337,
+        "ece_raw": 0.044,
+        "ece_cv": 0.019
+      },
+      "openrouter:deepseek/deepseek-v3.2": {
+        "mean_temperature": 1.471,
+        "ece_raw": 0.2297,
+        "ece_cv": 0.2093
+      },
+      "openrouter:cohere/command-a-03-2025": {
+        "mean_temperature": 1.0,
+        "ece_raw": null,
+        "ece_cv": null
+      },
+      "openrouter:meta-llama/llama-3.3-70b-instruct": {
+        "mean_temperature": 2.2864,
+        "ece_raw": 0.0932,
+        "ece_cv": 0.137
+      },
+      "openrouter:qwen/qwen3.7-plus": {
+        "mean_temperature": 1.0,
+        "ece_raw": 0.0,
+        "ece_cv": 0.0
+      },
+      "openrouter:nvidia/nemotron-3-super-120b-a12b": {
+        "mean_temperature": 1.0,
+        "ece_raw": 0.0,
+        "ece_cv": 0.0
+      }
+    },
+    "note": "temperature scaling (Guo 2017) measured HELD-OUT: k-fold grouped by item"
+  },
+  "panel_composition": {
+    "seats": [
+      {
+        "model_id": "openrouter:qwen/qwen3.7-plus",
+        "reliability_weight": 1.0,
+        "family": "qwen",
+        "review_flag": true
+      },
+      {
+        "model_id": "gemma4:31b",
+        "reliability_weight": 0.985914451330445,
+        "family": "gemma",
+        "review_flag": true
+      }
+    ],
+    "submodular": true,
+    "meets_quorum": false,
+    "escalate": true,
+    "not_seated": [
+      "granite4.1:30b",
+      "openrouter:cohere/command-a-03-2025",
+      "openrouter:deepseek/deepseek-v3.2",
+      "openrouter:meta-llama/llama-3.3-70b-instruct"
+    ],
+    "dropped_redundant": [
+      {
+        "dropped": "openrouter:nvidia/nemotron-3-super-120b-a12b",
+        "kept": "gemma4:31b",
+        "rho": 1.0
+      }
+    ],
+    "threshold": 0.25,
+    "min_judges": 3,
+    "notes": [
+      "2 judge(s) seated from 3 admitted; 1 dropped as \u03c1-redundant (\u22650.25); 4 not admitted (screen/reject)",
+      "quorum 2/3: NOT MET \u2192 escalate to the Claude Designer (PoLL \u22653); too few independent judges to trust a panel verdict",
+      "submodularity: PASS (every seated pair |\u03c1| < 0.25)",
+      "dropped openrouter:nvidia/nemotron-3-super-120b-a12b \u2014 error-correlated \u03c1=1.0 with seated gemma4:31b (kept the higher-reliability judge)"
+    ]
+  }
+}

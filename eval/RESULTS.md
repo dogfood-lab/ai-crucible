@@ -10,7 +10,7 @@ exists. See the caveat block in each section.
 
 ## Cross-family OpenRouter quorum (2026-06-28)
 
-**Artifacts:** [`eval/panel.json`](panel.json) · [`eval/characterization-report.json`](characterization-report.json)
+**Artifacts:** [`eval/panel.json`](panel.json) (committed seated panel) · [`eval/cross-family-quorum-2026-06-28.json`](cross-family-quorum-2026-06-28.json) (full characterization report)
 **Command:**
 ```
 uv run python -m ai_crucible.characterize.run \
