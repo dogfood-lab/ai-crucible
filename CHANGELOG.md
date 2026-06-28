@@ -131,6 +131,14 @@ seats stay provisional, graduation escalates to the Designer, and the version st
   salvage can leave one model missing a few items (a ragged matrix); the IRT item-prune screen now
   degrades to the item subset shared across all models and reports the dropped count, instead of
   erroring the whole screen (matching the per-pair degradation the panel-correlation screen already had).
+- **`calibration curate` crashed on a ragged grade-matrix (caught by the live-ρ demo).** The forward
+  discrimination screen (`select_discriminators`) called `irt.prune_items` directly, so a single
+  per-item salvage in the source run (a cloud-judge timeout) raised `IRT_RAGGED_MATRIX` and aborted
+  the whole curation — even though the post-hoc run screen already degrades the same input. Both paths
+  now share a new public `irt.shared_item_matrix` helper: curate degrades to the shared item subset
+  and REPORTS the ragged drops (`dropped_ragged`, surfaced in the CLI JSON) instead of crashing.
+  Surfaced + fixed test-first during the 2026-06-28 live-ρ-curation demonstration (see
+  `eval/RESULTS.md`).
 
 ## [0.3.0] — 2026-06-21
 

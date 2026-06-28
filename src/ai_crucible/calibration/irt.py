@@ -51,7 +51,13 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["point_biserial", "prune_items", "fit_irt_bayesian", "IRTError"]
+__all__ = [
+    "point_biserial",
+    "prune_items",
+    "shared_item_matrix",
+    "fit_irt_bayesian",
+    "IRTError",
+]
 
 
 class IRTError(ValueError):
@@ -127,6 +133,34 @@ def variance_of_item(item_correct: Sequence[bool] | Sequence[int]) -> float:
     if arr.size == 0:
         return 0.0
     return float(arr.var())  # population variance (ddof=0): p*(1-p) for a boolean item.
+
+
+def shared_item_matrix(
+    matrix: Mapping[str, Mapping[str, bool]],
+) -> tuple[dict[str, dict[str, bool]], list[str]]:
+    """Restrict a possibly-RAGGED response matrix to the item ids present for EVERY model.
+
+    Per-item salvage — a transient per-item failure/timeout during a characterization run — can
+    leave one model's row shorter than its peers, a RAGGED matrix that :func:`prune_items` refuses
+    (``IRT_RAGGED_MATRIX``) because the screen needs an identical item set across models. Rather
+    than erroring the whole screen on a thinned-but-valid panel, restrict to the shared item subset
+    and report the dropped (ragged) ids so the degradation is legible (no silent cap).
+
+    This is the same degradation the post-hoc run screen
+    (:func:`ai_crucible.characterize.run.irt_prune_report`) already applies; the FORWARD curation
+    step (:func:`ai_crucible.calibration.curate.select_discriminators`) needs it too — a single
+    cloud-run timeout otherwise crashes the whole curation (caught by the 2026-06-28 live-ρ demo).
+
+    Returns ``(restricted_matrix, dropped_ragged_item_ids)`` with ``dropped_ragged`` sorted. An
+    empty matrix returns ``({}, [])``.
+    """
+    if not matrix:
+        return {}, []
+    item_sets = [set(row) for row in matrix.values()]
+    shared = set.intersection(*item_sets)
+    dropped_ragged = sorted(set().union(*item_sets) - shared)
+    restricted = {m: {i: v for i, v in row.items() if i in shared} for m, row in matrix.items()}
+    return restricted, dropped_ragged
 
 
 def prune_items(

@@ -110,6 +110,7 @@ class CurationResult:
     dropped_ambiguous: list[str]           # ambiguity gate: verifiers disagreed (no key)
     dropped_mislabeled: list[str]          # ambiguity gate: verifiers agree, gold differs
     not_verified: list[str]                # kept but ambiguity gate not run (no verifier verdicts)
+    dropped_ragged: list[str] = field(default_factory=list)  # not scored by every model (salvage)
     notes: list[str] = field(default_factory=list)
 
 
@@ -118,27 +119,34 @@ def select_discriminators(
     *,
     min_variance: float = 0.0,
     min_point_biserial: float = 0.1,
-) -> tuple[list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str]]:
     """The AFLite / Fisher discrimination filter as a forward step.
 
-    Returns ``(kept, dropped_saturated, dropped_low_discrimination)``. Reuses
+    Returns ``(kept, dropped_saturated, dropped_low_discrimination, dropped_ragged)``. Reuses
     :func:`irt.prune_items` (the variance + corrected-point-biserial screen) for the kept/dropped
     split, then re-derives WHY each dropped item dropped (saturated vs low-r_pb) so the curation is
     legible — the saturation screen is the cheaper/first one, so an item that fails it is reported
     saturated even if it would also fail point-biserial.
+
+    A RAGGED grade-matrix (per-item salvage left a model missing a few items — e.g. a cloud-run
+    timeout) is degraded to the shared item subset via :func:`irt.shared_item_matrix`, and the
+    ragged drops are reported rather than crashing the whole screen with ``IRT_RAGGED_MATRIX`` (the
+    same degradation the run's post-hoc ``irt_prune_report`` applies; caught by the 2026-06-28
+    live-ρ demo).
     """
+    restricted, dropped_ragged = irt.shared_item_matrix(grade_matrix)
     kept, dropped = irt.prune_items(
-        grade_matrix, min_variance=min_variance, min_point_biserial=min_point_biserial
+        restricted, min_variance=min_variance, min_point_biserial=min_point_biserial
     )
     saturated: list[str] = []
     low_disc: list[str] = []
     for iid in dropped:
-        col = [bool(row[iid]) for row in grade_matrix.values() if iid in row]
+        col = [bool(row[iid]) for row in restricted.values() if iid in row]
         if irt.variance_of_item(col) <= min_variance:
             saturated.append(iid)
         else:
             low_disc.append(iid)
-    return kept, saturated, low_disc
+    return kept, saturated, low_disc, dropped_ragged
 
 
 def curate(
@@ -167,7 +175,7 @@ def curate(
         A :class:`CurationResult` with the surviving curated ids + every drop reason.
     """
     by_id = {it.id: it for it in items}
-    kept, saturated, low_disc = select_discriminators(
+    kept, saturated, low_disc, dropped_ragged = select_discriminators(
         grade_matrix, min_variance=min_variance, min_point_biserial=min_point_biserial
     )
     av = ambiguity_verdicts or {}
@@ -199,6 +207,11 @@ def curate(
         f"ambiguity gate dropped {len(dropped_amb)} ambiguous + {len(dropped_mis)} mislabeled; "
         f"{len(not_ver)} kept un-verified (no verifier verdicts supplied)",
     ]
+    if dropped_ragged:
+        notes.append(
+            f"grade-matrix was RAGGED — {len(dropped_ragged)} item(s) not scored by every model "
+            f"(per-item salvage) degraded to the shared subset: {dropped_ragged}"
+        )
     return CurationResult(
         kept=final,
         dropped_saturated=saturated,
@@ -206,5 +219,6 @@ def curate(
         dropped_ambiguous=dropped_amb,
         dropped_mislabeled=dropped_mis,
         not_verified=not_ver,
+        dropped_ragged=dropped_ragged,
         notes=notes,
     )

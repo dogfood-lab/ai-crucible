@@ -124,3 +124,83 @@ either (a) a harder, less-saturated discriminating set so error-diversity is mea
 11 items, or (b) the banked independent cross-family **cloud ω-anchor jury** (disjoint from the
 seats) to reduce — not remove — the ω circularity. Human validity still requires the human round
 the studio's structure can't staff.
+
+## Live ρ-curation demonstration (2026-06-28)
+
+**Artifacts:** [`eval/rho-demo-full-2026-06-28.json`](rho-demo-full-2026-06-28.json) (full-set,
+grade-matrix-bearing) · [`eval/rho-demo-curated-2026-06-28.json`](rho-demo-curated-2026-06-28.json)
+(curated re-run) · [`eval/rho-demo-harder-subset-2026-06-28.json`](rho-demo-harder-subset-2026-06-28.json)
+(the curated discriminating subset, re-usable as `characterize --items`).
+
+The bottom line above named lever **(a)** — *a harder, less-saturated discriminating set so
+error-diversity is measurable*. This run **tests** that lever end-to-end with the Phase-A curation
+pipeline: a fresh grade-matrix-bearing `characterize` run → `ai-crucible calibration curate` → a
+re-run on just the discriminators → compare the inter-judge error-correlation ρ.
+
+### Setup
+
+A fast 4-seat disjoint-family **cloud** panel (`qwen3-coder:480b@qwen`, `glm-4.6@zhipu`,
+`gpt-oss:120b@openai`, `gemini-3-flash-preview@google`), full 93 admission pairs, k=3. One seat
+(`glm-4.6:cloud`) dropped mid-run on a `410 Gone` — the volatile-cloud-roster reality — leaving 3
+graded judges. (A different, faster panel than the headline run above; the goal here is the curation
+*mechanism* + the ρ direction, not a new seating verdict.)
+
+### Result — the redundancy is a saturation artifact, and the bank is the bottleneck
+
+| metric | full set (93 items) | curated (3 discriminators) |
+| --- | --- | --- |
+| discriminating items | **3 of 91** kept (88 saturated) | 3 (the kept set) |
+| ρ(gpt-oss, qwen) | **+0.42** (> 0.25 ceiling) | **−0.50** |
+| ρ(gemini, gpt-oss) / ρ(gemini, qwen) | 0.0 / 0.0 | 0.0 / 0.0 |
+| judge accuracy (qwen / gpt-oss / gemini) | 0.97 / 1.00 / 1.00 | 0.64 / 0.74 / 1.00 |
+| seats → verdict | 2 (gemini, gpt-oss) → escalate | 0 → escalate |
+
+1. **The full-set redundancy does NOT survive curation.** The one above-ceiling pair (gpt-oss↔qwen,
+   ρ=+0.42 on the saturated 93-set) flips to ρ=−0.50 on the 3 discriminators — the positive
+   error-correlation was a **saturation artifact** (two strong judges co-passing the easy items),
+   exactly the Kohli 2026 (arXiv:2605.29800) "effective votes collapse on saturated sets" prediction.
+   The redundancy lived in the *bank*, not the *judges*.
+2. **The discrimination screen is brutal: 3 of 91.** Even more saturated than the headline's 11/93,
+   because these frontier cloud judges score acc 0.97–1.00 — almost everything is a co-pass. On the 3
+   hard items accuracy collapses (qwen 0.97→0.64, gpt-oss 1.00→0.74): they genuinely separate the
+   panel, which is *why* they survive the screen.
+3. **The curated ρ is not a measurement.** N=3 — one item flips |ρ| between 0 and 1, so −0.50 carries
+   no signal beyond "≠ +0.42". You cannot decorrelate a panel by sub-setting a saturated bank; you
+   run out of items first. **That is the finding: Phase B — new harder-construct content — is the
+   load-bearing lever, not re-screening the existing 93 pairs.** The pipeline confirms the
+   study-swarm's central claim empirically.
+
+### Dogfood win — the demo caught a real bug (fixed in this release)
+
+`ai-crucible calibration curate` **crashed** on this run's report (`[IRT_RAGGED_MATRIX]`): a single
+`gemini` per-item timeout left the persisted `grade_matrix` ragged, and the forward screen called
+`irt.prune_items` without the shared-item degradation the post-hoc run screen already applies. Since
+a per-item salvage is normal on any cloud run, curate would have crashed in the field. Fixed
+test-first (a new public `irt.shared_item_matrix`, reused by `select_discriminators`; the ragged
+drops are now reported, not silently swallowed): 854 → 857 tests. The two ragged items
+(`pair-23-boollogic`, `stat-03-simpson`) are surfaced in the curate output rather than crashing it.
+
+### Bottom line
+
+The Phase-A pipeline runs end-to-end and **empirically settles** the lever-(a) question:
+re-screening the existing bank can't fix the panel-redundancy problem, because the bank saturates to
+~3 discriminators for frontier judges. The fix is **content** (Phase B), not curation knobs. ω stays
+on ice; this run changes nothing about seating — it characterizes the *instrument's* own limit. And
+the demonstration paid for itself by surfacing and fixing a crash in the shipped curation path.
+
+### Reproduce
+
+```
+# 1. full-set run (any disjoint-family panel; cloud shown), persisting the grade matrix
+uv run ai-crucible characterize \
+  --models qwen3-coder:480b-cloud@qwen glm-4.6:cloud@zhipu \
+    gpt-oss:120b-cloud@openai gemini-3-flash-preview:cloud@google \
+  --k 3 --out eval/rho-demo-full-2026-06-28.json
+# 2. curate the discriminators offline (no model; degrades a ragged matrix to the shared subset)
+ai-crucible calibration curate --from-run eval/rho-demo-full-2026-06-28.json \
+  --out eval/rho-demo-harder-subset-2026-06-28.json
+# 3. re-run on just the discriminators (drop the dead glm tag), compare panel_correlation
+uv run ai-crucible characterize --items eval/rho-demo-harder-subset-2026-06-28.json \
+  --models qwen3-coder:480b-cloud@qwen gpt-oss:120b-cloud@openai gemini-3-flash-preview:cloud@google \
+  --k 3 --out eval/rho-demo-curated-2026-06-28.json
+```

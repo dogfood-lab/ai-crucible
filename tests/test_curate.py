@@ -28,6 +28,16 @@ _GM = {
     "mC": {"sat": True, "d1": False, "d2": False, "d3": False},
 }
 
+# The same panel, but mC is MISSING `d3` — a per-item salvage drop (a cloud-run timeout). The
+# persisted grade-matrix is then RAGGED, the shape the live-ρ demo hit: a single timeout crashed
+# the whole curation (`IRT_RAGGED_MATRIX`). The screen must degrade to the shared {sat,d1,d2}
+# subset and REPORT `d3` as ragged-dropped, mirroring the run's own irt_prune degradation.
+_GM_RAGGED = {
+    "mA": {"sat": True, "d1": True, "d2": True, "d3": True},
+    "mB": {"sat": True, "d1": True, "d2": False, "d3": False},
+    "mC": {"sat": True, "d1": False, "d2": False},  # `d3` missing — per-item salvage drop
+}
+
 
 def _item(iid: str, gold: str = "A") -> CalibrationItem:
     return CalibrationItem(
@@ -73,13 +83,35 @@ def test_ambiguity_gate_not_verified_under_two_choices() -> None:
 
 
 def test_select_discriminators_drops_saturated_keeps_discriminating() -> None:
-    kept, saturated, low_disc = select_discriminators(_GM)
+    kept, saturated, low_disc, ragged = select_discriminators(_GM)
     assert "sat" in saturated            # every model agreed → no discrimination
     assert "sat" not in kept
     assert set(kept) == {"d1", "d2", "d3"}
+    assert ragged == []                  # a clean (non-ragged) matrix drops nothing for raggedness
     # the partition is complete + disjoint
     assert len(kept) + len(saturated) + len(low_disc) == 4
     assert not (set(kept) & set(saturated))
+
+
+def test_select_discriminators_degrades_ragged_matrix() -> None:
+    """A per-item salvage drop (a cloud-run timeout) leaves one model missing an item — a RAGGED
+    grade-matrix. The forward screen must degrade to the shared item subset and REPORT the ragged
+    drop, not crash with IRT_RAGGED_MATRIX (the live-ρ demo, 2026-06-28, caught the crash; the run's
+    own irt_prune_report already degrades the same way)."""
+    kept, saturated, low_disc, ragged = select_discriminators(_GM_RAGGED)
+    assert ragged == ["d3"]                                 # surfaced, not silently dropped
+    assert "sat" in saturated                               # screened on the shared {sat,d1,d2}
+    assert "d3" not in kept and "d3" not in saturated and "d3" not in low_disc
+    assert set(kept) <= {"d1", "d2"}
+
+
+def test_shared_item_matrix_restricts_and_reports_ragged() -> None:
+    from ai_crucible.calibration import irt
+
+    restricted, ragged = irt.shared_item_matrix(_GM_RAGGED)
+    assert ragged == ["d3"]
+    assert all(set(row) == {"sat", "d1", "d2"} for row in restricted.values())
+    assert irt.shared_item_matrix({}) == ({}, [])           # empty → no crash
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +142,17 @@ def test_curate_without_verdicts_keeps_discriminators_flagged_unverified() -> No
     assert set(res.not_verified) == {"d1", "d2", "d3"}
     assert set(res.kept) == {"d1", "d2", "d3"}
     assert not res.dropped_ambiguous and not res.dropped_mislabeled
+
+
+def test_curate_reports_ragged_drops_instead_of_crashing() -> None:
+    """A ragged grade-matrix (one model timed out on an item) degrades to the shared subset and
+    surfaces the ragged drop on the result — it does not crash the whole curation."""
+    items = [_item("sat"), _item("d1"), _item("d2"), _item("d3")]
+    res = curate(items, _GM_RAGGED)
+    assert res.dropped_ragged == ["d3"]
+    assert "d3" not in res.kept
+    assert "sat" in res.dropped_saturated
+    assert set(res.kept) == {"d1", "d2"}
 
 
 # --------------------------------------------------------------------------- #

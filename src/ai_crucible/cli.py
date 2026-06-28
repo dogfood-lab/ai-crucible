@@ -771,6 +771,8 @@ def _calibration_curate(
                 "n_dropped_low_discrimination": len(result.dropped_low_discrimination),
                 "dropped_saturated": result.dropped_saturated,
                 "dropped_low_discrimination": result.dropped_low_discrimination,
+                "n_dropped_ragged": len(result.dropped_ragged),
+                "dropped_ragged": result.dropped_ragged,
                 "ambiguity_gate": "not_run_offline",
                 "wrote": wrote,
             },
