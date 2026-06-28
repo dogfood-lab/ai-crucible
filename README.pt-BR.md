@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -82,7 +82,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Prévia da pesquisa (v0.3.x).** O teste alternativo ω do painel de avaliadores ainda é um *modelo circular de simulação de júri*: para validá-lo, é necessário realizar uma rodada com **≥3 avaliadores humanos independentes** (o [teste alternativo](https://arxiv.org/abs/2501.10970)), o que um estúdio com apenas um avaliador humano não consegue fazer — portanto, essa rodada está **suspensa por restrição estrutural, e não por negligência**. Os avaliadores permanecem em estado **provisório**, o painel formado **é expandido para incluir um Claude Designer** quando o número mínimo de participantes não é atingido, e o instrumento revela isso em vez de simular uma base humana. Consulte a [tabela de resultados](SCORECARD.md) para obter os resultados honestos e objetivos da avaliação.
+**Ferramentas de qualidade para avaliação offline** – sem modelo, sem GPU, executadas a partir de um relatório de execução registrado:
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+> **Prévia da pesquisa (v0.4.x).** O teste alternativo ω do painel de avaliadores ainda é um *modelo circular de simulação de júri*: para validá-lo, é necessário realizar uma rodada com **≥3 avaliadores humanos independentes** (o [teste alternativo](https://arxiv.org/abs/2501.10970)), o que um estúdio com apenas um avaliador humano não consegue fazer — portanto, essa rodada está **suspensa por restrição estrutural, e não por negligência**. Os avaliadores permanecem em estado **provisório**, o painel formado **é expandido para incluir um Claude Designer** quando o número mínimo de participantes não é atingido, e o instrumento revela isso em vez de simular uma base humana. Consulte a [tabela de resultados](SCORECARD.md) para obter os resultados honestos e objetivos da avaliação.
 
 ## Início rápido (a partir do código-fonte)
 
@@ -101,6 +112,12 @@ uv run ruff check .
 # One command: lint + tests + build + smoke
 bash verify.sh
 ```
+
+## Avaliação entre diferentes famílias de modelos
+
+A primeira execução **publicada** de avaliação entre diferentes famílias de modelos está disponível em [`eval/RESULTS.md`](eval/RESULTS.md) (juntamente com o arquivo `eval/panel.json` e o relatório de caracterização). Sete famílias distintas – duas locais (gemma4, granite4.1) e cinco endpoints do OpenRouter selecionados – foram avaliadas em 93 pares de calibração com k=3: 1.395 chamadas pagas com **zero interrupções devido a limites de taxa**.
+
+**O resultado honesto:** o conjunto agora **aceita 3 famílias distintas** (em vez das 2 originais, que eram apenas locais), e um novo avaliador entre diferentes famílias é integrado – mas o painel *independente* composto ainda tem **2 membros** (o terceiro foi removido para evitar redundância de erros, ρ≈1.0), o que é **inferior ao quórum**, portanto, o painel **passa a utilizar o Claude Designer** em vez de tomar uma decisão automática. O gargalo acabou sendo o **eixo ω do teste alternativo não validado, e não a qualidade dos avaliadores** – quatro avaliadores fortes (precisão de 0,91–0,96) são avaliados *exclusivamente* no modelo circular-júri ω. “3 aceitos” é um passo real; **não** é uma solução para o problema do eixo ω. O eixo ω permanece em espera, os membros permanecem provisórios e a conclusão ainda está adiada – divulgado, não simulado.
 
 ## Documentação
 

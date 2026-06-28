@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/python-3.11%E2%80%933.13-blue.svg" alt="Python 3.11–3.13" />
   <img src="https://img.shields.io/badge/coverage-94%25-brightgreen.svg" alt="Coverage 94%" />
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.3.0-orange.svg" alt="Version 0.3.0" /></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.4.0-orange.svg" alt="Version 0.4.0" /></a>
   <a href="https://dogfood-lab.github.io/ai-crucible/"><img src="https://img.shields.io/badge/docs-handbook-orange.svg" alt="Handbook" /></a>
 </p>
 
@@ -82,7 +82,18 @@ ai-crucible catalog graduate             # preview Lab->Arena->Regression transi
 ai-crucible probe puzzles/seed-sulzbach-55252 --model claude-opus-4-8@claude --k 5
 ```
 
-> **Vista previa de la investigación (v0.3.x).** La prueba alternativa ω del jurado sigue siendo un *modelo circular de validación por bootstrapping*: para validarla, se necesita una ronda de **≥3 anotadores humanos independientes** (la [prueba alternativa](https://arxiv.org/abs/2501.10970)), lo cual no puede ser realizado por un estudio con un solo evaluador; por lo tanto, esta ronda está **temporalmente suspendida debido a una limitación estructural, no por falta de atención**. Los jueces permanecen en estado **provisional**, el jurado se **amplía hasta convertirse en un Claude Designer** cuando no se alcanza el quórum y el instrumento revela esto en lugar de simular la participación humana. Consulte la [hoja de resultados](SCORECARD.md) para obtener los resultados honestos y reales de las pruebas.
+**Herramientas de calidad para pruebas sin conexión:** no requiere modelo ni GPU, se ejecuta a partir de un informe de ejecución registrado:
+
+```bash
+# Forward-screen a less-saturated, still-defensible discriminating admission set
+# from a characterization run's persisted grade matrix (the harder-set pipeline):
+ai-crucible calibration curate --from-run report.json --out harder.json
+
+# Validate a candidate human-label file before a --human-labels round (intake gate):
+ai-crucible labels validate human_labels.json
+```
+
+> **Vista previa de la investigación (v0.4.x).** La prueba alternativa ω del jurado sigue siendo un *modelo circular de validación por bootstrapping*: para validarla, se necesita una ronda de **≥3 anotadores humanos independientes** (la [prueba alternativa](https://arxiv.org/abs/2501.10970)), lo cual no puede ser realizado por un estudio con un solo evaluador; por lo tanto, esta ronda está **temporalmente suspendida debido a una limitación estructural, no por falta de atención**. Los jueces permanecen en estado **provisional**, el jurado se **amplía hasta convertirse en un Claude Designer** cuando no se alcanza el quórum y el instrumento revela esto en lugar de simular la participación humana. Consulte la [hoja de resultados](SCORECARD.md) para obtener los resultados honestos y reales de las pruebas.
 
 ## Guía rápida (desde el código fuente)
 
@@ -101,6 +112,12 @@ uv run ruff check .
 # One command: lint + tests + build + smoke
 bash verify.sh
 ```
+
+## Evaluación entre diferentes familias de modelos
+
+La primera ejecución **publicada** de evaluación entre diferentes familias de modelos se encuentra en [`eval/RESULTS.md`](eval/RESULTS.md) (junto con el archivo `eval/panel.json` y el informe de caracterización). Se evaluaron siete familias de modelos distintas: dos locales (gemma4, granite4.1) y cinco puntos finales de OpenRouter (deepseek, cohere, meta-llama, qwen, nvidia), utilizando 93 pares de calibración con k=3: 1395 llamadas pagadas sin **ningún caso de limitación de velocidad**.
+
+**El resultado real:** el conjunto ahora **admite 3 familias distintas** (en comparación con las 2 locales anteriores), y un nuevo evaluador entre diferentes familias se integra correctamente, pero el panel *independiente* compuesto sigue teniendo **2 miembros** (el tercero se elimina para evitar redundancia de errores, ρ≈1.0), lo que es **inferior al quórum**, por lo que el panel **pasa a utilizar Claude Designer** en lugar de tomar una decisión automática. El cuello de botella resultó ser el **eje ω del test alternativo no validado, y no la calidad del evaluador**: se evalúan *únicamente* cuatro evaluadores sólidos (precisión 0.91–0.96) en el modelo-jurado circular ω. "3 admitidos" es un paso real; **no** significa que "se haya resuelto ω". ω permanece inactivo, los miembros siguen siendo provisionales y la graduación se pospone aún más: se revela, no se falsifica.
 
 ## Documentación
 

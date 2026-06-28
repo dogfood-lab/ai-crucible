@@ -128,9 +128,9 @@ its own consumption.
 
 ## Supported versions
 
-AI Crucible is pre-1.0 and public as of the Phase-1 milestone (v0.2.0). Only the
-current `main` / active build branch receives security fixes. There is no
-back-port guarantee for tagged pre-releases.
+AI Crucible is pre-1.0. It went public at the Phase-1 milestone (v0.2.0) and is
+currently **v0.4.0**. Only the current `main` / active build branch receives
+security fixes. There is no back-port guarantee for tagged pre-releases.
 
 | Version | Supported |
 | ------- | --------- |

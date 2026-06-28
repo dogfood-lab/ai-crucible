@@ -20,7 +20,7 @@ uv run python -m ai_crucible.characterize.run \
     openrouter:meta-llama/llama-3.3-70b-instruct@meta \
     openrouter:qwen/qwen3.7-plus@qwen \
     openrouter:nvidia/nemotron-3-super-120b-a12b@nvidia \
-  --k 3 --out eval/characterization-report.json --write-panel eval/panel.json
+  --k 3 --out eval/cross-family-quorum-2026-06-28.json --write-panel eval/panel.json
 ```
 7 seats (2 local + 5 pinned OpenRouter), 7 genuinely disjoint families, 93 admission pairs, k=3.
 Run was **not degraded** — every seat returned the full 279 records, 0 unparsed, 0 dropped (the

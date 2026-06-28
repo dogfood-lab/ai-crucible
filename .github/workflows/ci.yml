@@ -32,9 +32,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two most-tested floors. 3.11 is the supported lower bound
-        # (requires-python >=3.11) and 3.12 is the upper end exercised here.
-        python-version: ["3.11", "3.12"]
+        # The full supported range. 3.11 is the lower bound (requires-python
+        # >=3.11) and 3.13 is the upper end (requires-python <3.14) — every
+        # version advertised in the PyPI classifiers is exercised here, so the
+        # classifier claim is verified, not assumed.
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Checkout

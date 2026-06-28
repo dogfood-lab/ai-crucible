@@ -24,7 +24,7 @@ from ai_crucible.types import (
 
 
 def test_version() -> None:
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0"
 
 
 def test_default_framing_arm_is_self_referential() -> None:

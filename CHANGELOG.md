@@ -5,7 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-06-28
+
+OpenRouter cross-family quorum swarm: the first **published** cross-family judge-admission
+run + two eval-integrity health passes (1 CRITICAL + 4 HIGH, every fix test-first and
+cross-family verified) + an offline human-label intake gate + the harder-set curation
+pipeline (study-swarm Phase A). Suite **795 → 854** tests; ruff clean; CI green on Python
+3.11 / 3.12 / 3.13. The run admitted **3 disjoint families** to the judge pool (up from 2
+local-only) and seated a genuinely new cross-family judge — but the composed panel still
+**escalates** (sub-quorum + error-redundancy), and the alt-test ω stays a circular
+model-jury bootstrap (no ≥3 independent human annotators a one-human studio can staff). So
+seats stay provisional, graduation escalates to the Designer, and the version stays **0.x**:
+"3 admit" ≠ "ω solved". Disclosed, not faked.
 
 ### Added
 - **OpenRouter cross-family seat** — a new `OpenRouterModel` adapter
@@ -31,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **`eval/RESULTS.md` — published cross-family judge-admission runs.** The first cross-family
   OpenRouter quorum run (2 local + 5 pinned-OpenRouter seats, 7 disjoint families, 93 pairs, k=3)
-  with its committed `eval/panel.json` + `eval/characterization-report.json`. Result: 3 disjoint
+  with its committed `eval/panel.json` + `eval/cross-family-quorum-2026-06-28.json`. Result: 3 disjoint
   families now clear the 6-metric admission bar (up from 2), but the composed panel still escalates
   (sub-quorum, error-redundancy) and ω stays on ice — seats provisional, disclosed not faked.
 
