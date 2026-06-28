@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **OpenRouter cross-family seat** — a new `OpenRouterModel` adapter
+  (`models/openrouter_adapter.py`) makes the whole OpenRouter catalog — the open families AND the
+  closed frontier (real GPT, Gemini) the open-only Ollama-Cloud roster can't give — available as
+  cross-family panel judges / Solvers / the banked cloud ω-anchor jury, through one
+  OpenAI-compatible key. Selected by an `openrouter:` id prefix that REQUIRES an explicit `@family`
+  (`--model openrouter:deepseek/deepseek-chat@deepseek`); the prefix is kept as the model's identity
+  so a seated OpenRouter judge round-trips through `panel.json` → `run --panel`. Wired into all three
+  construction sites — `cli._build_model` (run/probe Solver), `characterize._parse_models` +
+  `run_panel` (the panel), and the seated-panel reconstruction.
+  - Mirrors `OllamaModel`'s surface (`generate`/`judge`/`as_judge`/`judge_item`/`pin_metadata`/
+    `.family`), pins `temperature=0`, reads `OPENROUTER_API_KEY` at call time, and reuses the shared
+    verdict-token-logprob → confidence path (OpenRouter returns OpenAI-shape logprobs, §12).
+  - **Served-model guard** folds out OpenRouter's dated snapshots / variant suffixes
+    (`cohere/north-mini-code-20260617:free` ≈ the requested bare id) before the provenance check, so
+    only a genuine cross-vendor fallback raises `ModelMismatchError`.
+  - **Non-fatal vendor↔family warning** — because an OpenRouter id exposes the vendor, a clear
+    contradiction (`deepseek/deepseek-chat@qwen`) emits a `UserWarning` (a typo-catcher for a
+    mislabel that would corrupt the cross-family attribution) without a brittle vendor→family table
+    or a refusal. The operator's `@family` stays the authoritative axis — consistent with the
+    trusting Ollama path.
+
 ## [0.3.0] — 2026-06-21
 
 Dogfood-swarm: hardening + the first runnable diagnostic cycle + the durable catalog +

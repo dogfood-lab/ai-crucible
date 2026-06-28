@@ -159,9 +159,14 @@ def _build_model(model_spec: str) -> DiagnosticModel:
     contain ``@``-free ``:`` tags like ``mistral-small:24b``) chooses the adapter and
     feeds the panel's same-family exclusion (§10.2):
 
-    * no ``@family`` tag, or ``@claude`` → :class:`~ai_crucible.models.claude_adapter.ClaudeModel`
-      (the default Designer/Solver, Anthropic API — reads ``ANTHROPIC_API_KEY`` at call time);
-    * any other ``@family`` → :class:`~ai_crucible.models.ollama_adapter.OllamaModel` of that
+    * an ``openrouter:``-prefixed id →
+      :class:`~ai_crucible.models.openrouter_adapter.OpenRouterModel` of the explicit ``@family``
+      (a cross-family seat via the OpenAI-compatible OpenRouter endpoint — reads
+      ``OPENROUTER_API_KEY`` at call time; an ``@family`` is REQUIRED for attribution);
+    * else no ``@family`` tag, or ``@claude`` →
+      :class:`~ai_crucible.models.claude_adapter.ClaudeModel` (the default Designer/Solver,
+      Anthropic API — reads ``ANTHROPIC_API_KEY`` at call time);
+    * else any other ``@family`` → :class:`~ai_crucible.models.ollama_adapter.OllamaModel` of that
       family (a local model served by Ollama).
 
     Kept a module-level seam (not inlined) so the ``run`` tests inject a CANNED model via
@@ -175,6 +180,16 @@ def _build_model(model_spec: str) -> DiagnosticModel:
         model_id, family = model_spec, ""
 
     fam = family.strip().lower()
+    if model_id.startswith("openrouter:"):
+        if not fam:
+            raise ValueError(
+                "[OPENROUTER_NO_FAMILY] an 'openrouter:' model needs an explicit @family for "
+                "cross-family attribution "
+                "(hint: e.g. --model openrouter:deepseek/deepseek-chat@deepseek)"
+            )
+        from ai_crucible.models.openrouter_adapter import OpenRouterModel
+
+        return OpenRouterModel(model_id=model_id, family=fam)
     if fam and fam != "claude":
         from ai_crucible.models.ollama_adapter import OllamaModel
 
@@ -385,14 +400,18 @@ def _load_panel_and_signal(path: Path | None):
 
     from ai_crucible.characterize.panel_store import load_panel
     from ai_crucible.models.ollama_adapter import OllamaModel
+    from ai_crucible.models.openrouter_adapter import OpenRouterModel
     from ai_crucible.scoring.judge_panel import JudgePanel
 
     seated = load_panel(path)
 
     def judge_for(model_id: str) -> JudgeFn:
-        # The seat carries the family; instantiate a local Ollama judge for it. The
-        # family is re-bound by from_seated from the seat record, so a placeholder here
-        # is fine — the panel reads the seat's family for exclusion.
+        # The seat carries the family; instantiate a judge for it. An OpenRouter seat keeps its
+        # ``openrouter:`` id prefix, so it round-trips here to the right adapter; everything else is
+        # a local Ollama judge. The family is re-bound by from_seated from the seat record, so a
+        # placeholder here is fine — the panel reads the seat's family for exclusion.
+        if model_id.startswith("openrouter:"):
+            return OpenRouterModel(model_id=model_id, family="").as_judge()
         return OllamaModel(model_id=model_id, family="").as_judge()
 
     panel = JudgePanel.from_seated(seated, judge_for)

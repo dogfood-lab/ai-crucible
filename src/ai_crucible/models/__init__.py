@@ -22,5 +22,6 @@ from __future__ import annotations
 
 from ai_crucible.models.claude_adapter import ClaudeModel
 from ai_crucible.models.ollama_adapter import OllamaModel
+from ai_crucible.models.openrouter_adapter import OpenRouterModel, is_openrouter_spec
 
-__all__ = ["ClaudeModel", "OllamaModel"]
+__all__ = ["ClaudeModel", "OllamaModel", "OpenRouterModel", "is_openrouter_spec"]
