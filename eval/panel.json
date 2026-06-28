@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "seats": [
+    {
+      "model_id": "openrouter:qwen/qwen3.7-plus",
+      "reliability_weight": 1.0,
+      "family": "qwen",
+      "review_flag": true
+    },
+    {
+      "model_id": "gemma4:31b",
+      "reliability_weight": 0.985914451330445,
+      "family": "gemma",
+      "review_flag": true
+    }
+  ],
+  "submodular": true,
+  "meets_quorum": false,
+  "escalate": true,
+  "not_seated": [
+    "granite4.1:30b",
+    "openrouter:cohere/command-a-03-2025",
+    "openrouter:deepseek/deepseek-v3.2",
+    "openrouter:meta-llama/llama-3.3-70b-instruct"
+  ],
+  "dropped_redundant": [
+    {
+      "dropped": "openrouter:nvidia/nemotron-3-super-120b-a12b",
+      "kept": "gemma4:31b",
+      "rho": 1.0
+    }
+  ],
+  "threshold": 0.25,
+  "min_judges": 3,
+  "notes": [
+    "2 judge(s) seated from 3 admitted; 1 dropped as \u03c1-redundant (\u22650.25); 4 not admitted (screen/reject)",
+    "quorum 2/3: NOT MET \u2192 escalate to the Claude Designer (PoLL \u22653); too few independent judges to trust a panel verdict",
+    "submodularity: PASS (every seated pair |\u03c1| < 0.25)",
+    "dropped openrouter:nvidia/nemotron-3-super-120b-a12b \u2014 error-correlated \u03c1=1.0 with seated gemma4:31b (kept the higher-reliability judge)"
+  ]
+}

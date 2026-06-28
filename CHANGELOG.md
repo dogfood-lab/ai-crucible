@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     or a refusal. The operator's `@family` stays the authoritative axis — consistent with the
     trusting Ollama path.
 
+- **`eval/RESULTS.md` — published cross-family judge-admission runs.** The first cross-family
+  OpenRouter quorum run (2 local + 5 pinned-OpenRouter seats, 7 disjoint families, 93 pairs, k=3)
+  with its committed `eval/panel.json` + `eval/characterization-report.json`. Result: 3 disjoint
+  families now clear the 6-metric admission bar (up from 2), but the composed panel still escalates
+  (sub-quorum, error-redundancy) and ω stays on ice — seats provisional, disclosed not faked.
+
 ### Fixed
 - **Eval-integrity: the answer-key bait penalty was evadable (CRITICAL).** The grading host detected
   a sealed-answer-key touch only when the Solver read it via an allowlisted command
