@@ -353,6 +353,170 @@ def test_run_appears_in_help_with_exit_codes(capsys) -> None:
     assert "--model" in helptext
 
 
+# --- `ai-crucible labels validate`: the Fork-C offline intake gate (§12.2) ------------- #
+#
+# These assert the OFFLINE label-validation surface: it loads the calibration items + calls
+# load_human_labels in check-only mode and reports the alt-test inputs — with NO model seated
+# (the whole point). The loader itself is exercised by tests/test_human_labels.py; here we
+# prove the CLI wiring: dispatch, exit codes, the STDOUT-JSON / STDERR-chrome split, the
+# --items threading, the under-power note, and the structured-error contract.
+
+_EXAMPLE = (
+    Path(__file__).resolve().parents[1]
+    / "src" / "ai_crucible" / "calibration" / "human_labels.example.json"
+)
+
+
+def _write_items(tmp_path, ids: list[str]) -> Path:
+    """A minimal calibration items file (one valid CalibrationItem per id)."""
+    import json
+
+    items = [
+        {
+            "id": iid,
+            "category": "known_diagnostic",
+            "construct": "t",
+            "confound_controlled": "t",
+            "prompt": "p",
+            "gold": "A" if i % 2 == 0 else "B",
+        }
+        for i, iid in enumerate(ids)
+    ]
+    p = tmp_path / "items.json"
+    p.write_text(json.dumps(items), encoding="utf-8")
+    return p
+
+
+def _write_labels(tmp_path, ids: list[str], *, annotators=("a1", "a2", "a3")) -> Path:
+    """A valid human_labels.json: every annotator agrees A/B by item index parity."""
+    import json
+
+    labels = {
+        iid: {a: ("A" if i % 2 == 0 else "B") for a in annotators}
+        for i, iid in enumerate(ids)
+    }
+    obj = {
+        "schema_version": 1,
+        "annotators": {a: {"tier": "expert"} for a in annotators},
+        "labels": labels,
+    }
+    p = tmp_path / "human_labels.json"
+    p.write_text(json.dumps(obj), encoding="utf-8")
+    return p
+
+
+def test_labels_validate_committed_example_against_default_set(capsys) -> None:
+    """The shipped `human_labels.example.json` must validate out of the box against the
+    bundled admission_pairs.json (no --items) — proving it stays a working copy-paste
+    starting point. STDOUT carries ONLY the machine JSON; the human chrome is on STDERR."""
+    import json
+
+    assert _EXAMPLE.is_file(), "the committed example file must exist"
+    rc = cli.main(["labels", "validate", str(_EXAMPLE)])
+    captured = capsys.readouterr()
+    assert rc == 0
+
+    data = json.loads(captured.out.strip())  # STDOUT is exactly one JSON object
+    assert data["ok"] is True
+    assert data["n_annotators"] >= 3          # clears the ≥3 floor
+    assert data["n_items_labeled"] >= 30      # clears the ≥30 floor
+    assert data["under_powered"] is False
+    assert data["epsilon"] == pytest.approx(0.2)   # all-expert roster
+    assert data["items_source"] == "admission_pairs.json"
+    # the example demonstrates a DISPUTED drop and reports it
+    assert data["n_disputed"] == len(data["disputed_items"]) >= 1
+
+    # Human chrome → STDERR, never STDOUT.
+    assert "labels validate" in captured.err
+    assert "annotators" in captured.err
+    assert "No model was seated" in captured.err
+    assert "{" not in captured.err  # no JSON leaked onto the chrome stream
+
+
+def test_labels_validate_threads_items_flag(tmp_path, capsys) -> None:
+    """`--items` points the validation at an operator-supplied calibration set; the labels
+    validate cleanly against it and the JSON names that source."""
+    import json
+
+    ids = [f"itm-{i:02d}" for i in range(32)]
+    items = _write_items(tmp_path, ids)
+    labels = _write_labels(tmp_path, ids)
+
+    rc = cli.main(["labels", "validate", str(labels), "--items", str(items)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    data = json.loads(captured.out.strip())
+    assert data["n_annotators"] == 3
+    assert data["n_items_labeled"] == 32
+    assert data["under_powered"] is False
+    assert data["items_source"] == str(items)
+    assert data["iaa_krippendorff_alpha"] == pytest.approx(1.0)  # unanimous → α = 1.0
+
+
+def test_labels_validate_under_powered_is_exit_0_with_flag(tmp_path, capsys) -> None:
+    """A structurally VALID file below the 30-item floor is NOT a hard error: exit 0, but
+    `under_powered: true` + a loud note (the loader's honest-surface contract)."""
+    import json
+
+    ids = [f"itm-{i:02d}" for i in range(10)]  # < MIN_ITEMS
+    items = _write_items(tmp_path, ids)
+    labels = _write_labels(tmp_path, ids)
+
+    rc = cli.main(["labels", "validate", str(labels), "--items", str(items)])
+    captured = capsys.readouterr()
+    assert rc == 0
+    data = json.loads(captured.out.strip())
+    assert data["under_powered"] is True
+    assert data["n_items_labeled"] == 10
+    assert any("under-powered" in n or "30" in n for n in data["notes"])
+    assert "UNDER-POWERED" in captured.err
+
+
+def test_labels_validate_missing_file_is_structured_error_exit_1(capsys) -> None:
+    """A nonexistent label file raises the loader's structured ``[CODE] msg (hint:)`` error,
+    rendered by main()'s handler as ONE stderr line (exit 1), not a traceback."""
+    rc = cli.main(["labels", "validate", "no/such/human_labels.json"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "[INPUT_PATH_MISSING]" in captured.err
+    assert "(hint:" in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+    assert captured.out.strip() == ""  # no JSON emitted on a failure
+
+
+def test_labels_validate_too_few_annotators_is_structured_error_exit_1(
+    tmp_path, capsys
+) -> None:
+    """The loader's ≥3-annotator hard floor propagates through the CLI as a structured error
+    (exit 1) — the offline gate refuses an under-rostered file just as the run would."""
+    ids = [f"itm-{i:02d}" for i in range(30)]
+    items = _write_items(tmp_path, ids)
+    labels = _write_labels(tmp_path, ids, annotators=("a1", "a2"))  # only 2
+
+    rc = cli.main(["labels", "validate", str(labels), "--items", str(items)])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "TOO_FEW_ANNOTATORS" in captured.err
+    assert "Traceback (most recent call last)" not in captured.err
+
+
+def test_labels_requires_a_subcommand_exit_2(capsys) -> None:
+    """`labels` with no subcommand is a bad invocation → exit 2 (distinct from a load
+    failure's exit 1)."""
+    rc = cli.main(["labels"])
+    assert rc == 2
+    assert "subcommand is required" in capsys.readouterr().err
+
+
+def test_labels_appears_in_help(capsys) -> None:
+    """The `labels validate` command is discoverable from --help."""
+    assert cli.main(["--help"]) == 0
+    helptext = capsys.readouterr().out
+    assert "labels" in helptext
+    assert "validate" in helptext
+    assert "human_labels.json" in helptext
+
+
 def test_build_model_selects_adapter_by_family_tag(monkeypatch) -> None:
     """`_build_model` picks Claude for no-tag/@claude and Ollama for any other @family —
     constructed lazily, without a network call (we assert the TYPE, not a call)."""

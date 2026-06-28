@@ -35,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   families now clear the 6-metric admission bar (up from 2), but the composed panel still escalates
   (sub-quorum, error-redundancy) and ω stays on ice — seats provisional, disclosed not faked.
 
+- **`ai-crucible labels validate` — offline human-label intake gate (Fork C, §12.2).** A thin new
+  subcommand that loads the calibration items and runs `load_human_labels` in **check-only mode** —
+  reporting annotator count, item count, ε, IAA Krippendorff α, DISPUTED drops, and the under-power
+  note — with **no model seated and no GPU**, so an operator can validate a candidate
+  `human_labels.json` the day independent annotators deliver one, long before a full
+  `characterize --human-labels` run. Calls the same loader the run uses (a file that validates here
+  is one the run accepts); human chrome → STDERR, machine JSON → STDOUT; structured
+  `[CODE] msg (hint:)` errors on a malformed file (exit 1), exit 2 on a bad invocation, exit 0 with
+  `under_powered: true` for a valid-but-thin file. Ships a copy-paste starting point at
+  `calibration/human_labels.example.json` (3 expert annotators over 32 bundled items, clearing the
+  ≥3-annotator / ≥30-item floors, with one `unsure` and one disputed split) and a handbook page
+  ("Retiring the circular omega (Fork C)"). This is intake plumbing only — it fabricates no labels,
+  and ω stays the circular model-jury bootstrap until ≥3 *independent* humans exist.
+
 ### Fixed
 - **Eval-integrity: the answer-key bait penalty was evadable (CRITICAL).** The grading host detected
   a sealed-answer-key touch only when the Solver read it via an allowlisted command

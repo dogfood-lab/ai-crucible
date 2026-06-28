@@ -100,6 +100,16 @@ commands:
                  test-framing and report whether behaviour (bait-touch / solve) DIVERGES
                  (a leaking eval cue, §10.5). usage:
                    ai-crucible probe <puzzle-dir> --model <id>[@family] [--k N]
+  labels         OFFLINE intake gate for a human_labels.json — validate a candidate label
+                 file and report the alt-test inputs (annotator count, item count, ε, IAA
+                 Krippendorff α, DISPUTED drops, under-power note) with NO model run
+                 (Fork C, §12.2). usage:
+                   ai-crucible labels validate <human_labels.json> [--items <path>]
+                 Defaults the calibration items to the bundled admission_pairs.json; pass
+                 --items for your own set. A copy-paste starting point ships at
+                 calibration/human_labels.example.json. Human chrome → STDERR; machine
+                 JSON → STDOUT. (ω stays the circular model-jury bootstrap until ≥3
+                 INDEPENDENT human annotators exist — this is the day-they-arrive plumbing.)
   catalog        read + curate the durable catalog (Epic 4 persistence/graduation). usage:
                    ai-crucible catalog list   [--catalog PATH]
                    ai-crucible catalog show   <puzzle-id> [--catalog PATH]
@@ -124,6 +134,9 @@ exit codes:
      gates should treat 1 (degraded/empty result) distinctly from 2 (bad invocation).
   1  (run) the puzzle failed to load or stage (a structured [CODE] msg (hint:) error on
      stderr) — distinct from 2 (a bad invocation that never reached the cycle).
+  1  (labels validate) the label/items file is missing or malformed (a structured
+     [CODE] msg (hint:) error on stderr) — distinct from 2 (a bad invocation). A VALID
+     but under-powered file (<30 items) is exit 0 with `under_powered: true` in the JSON.
 """
 
 
@@ -147,6 +160,9 @@ def _dispatch(command: str, rest: list[str]) -> int:
 
     if command == "probe":
         return _probe_command(rest)
+
+    if command == "labels":
+        return _labels_command(rest)
 
     sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
@@ -467,6 +483,139 @@ def _probe_command(rest: list[str]) -> int:
         "deploy_solve_rate": result.deploy_solve_rate, "test_solve_rate": result.test_solve_rate,
         "bait_divergence": result.bait_divergence, "diverged": result.diverged,
     }, default=str) + "\n")
+    return 0
+
+
+def _labels_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible labels validate <path> [--items <path>]`` (Fork C, §12.2).
+
+    The OFFLINE intake gate for a candidate ``human_labels.json``: it validates the file and
+    reports the alt-test inputs (annotator count, item count, ε, IAA Krippendorff α, DISPUTED
+    drops, the under-power note) WITHOUT seating a single model or touching a GPU. It exists
+    so an operator can check a label file the day independent annotators deliver one — long
+    before a full ``characterize --human-labels`` run (model load + judging) is worth it. It
+    calls the SAME :func:`load_human_labels` the run uses, so a file that validates here is
+    exactly a file the run accepts. Stage-C honesty: human chrome → STDERR, machine JSON →
+    STDOUT. A bad invocation (no subcommand / no path) is exit 2; a missing/malformed file
+    raises the loader's structured ``[CODE] msg (hint:)`` error, rendered as one line by
+    ``main()`` (exit 1).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="ai-crucible labels", add_help=True)
+    sub = parser.add_subparsers(dest="action")
+
+    p_val = sub.add_parser(
+        "validate", help="validate a human_labels.json offline (reports ε/IAA/disputed, no model)"
+    )
+    p_val.add_argument("path", help="the candidate human_labels.json to validate")
+    p_val.add_argument(
+        "--items",
+        type=Path,
+        default=None,
+        help="calibration items file/dir the labels are over "
+        "(default: the bundled admission_pairs.json)",
+    )
+
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if args.action is None:
+        sys.stderr.write("ai-crucible labels: a subcommand is required (validate)\n")
+        return 2
+    if args.action == "validate":
+        return _labels_validate(Path(args.path), args.items)
+    sys.stderr.write(f"ai-crucible labels: unknown subcommand {args.action!r}\n")
+    return 2
+
+
+def _labels_validate(path: Path, items_path: Path | None) -> int:
+    """``labels validate`` — load + validate a label file in CHECK-ONLY mode and report the
+    alt-test inputs. NO model is seated (that is the whole point — §12.2 intake plumbing).
+
+    ``load_human_labels`` validates everything (shape, tiers, unknown items/annotators, the
+    ≥3-annotator floor) and computes ε / IAA / DISPUTED before any model exists, so calling
+    it IS the check-only mode. A failure raises the loader's structured ``[CODE] msg (hint:)``
+    error (rendered as one line by ``main()``, exit 1). A file that loads but falls below the
+    ≥30-item floor is VALID-but-under-powered: exit 0 with ``under_powered: true`` and a loud
+    note (the loader's honest-surface contract — it does not hard-fail on N<30).
+    """
+    import json as _json
+
+    from ai_crucible.calibration.loader import load_items
+    from ai_crucible.characterize.human_labels import (
+        MIN_ANNOTATORS,
+        MIN_ITEMS,
+        load_human_labels,
+    )
+
+    if items_path is not None:
+        items = load_items(items_path)
+        items_source = str(items_path)
+    else:
+        # The default the run uses too: the bundled judge-admission pairs set, which the
+        # committed calibration/human_labels.example.json is keyed against (so the example
+        # validates out of the box with no --items). Sibling of this module's calibration/.
+        default_items = Path(__file__).parent / "calibration" / "admission_pairs.json"
+        items = load_items(default_items)
+        items_source = default_items.name
+
+    hl = load_human_labels(path, items)
+    under_powered = hl.n_items < MIN_ITEMS
+
+    # Human chrome → STDERR.
+    lines = [f"ai-crucible labels validate — {path}"]
+    lines.append(f"  items source      : {items_source} ({len(items)} calibration items)")
+    lines.append(f"  annotators        : {hl.n_annotators} (floor ≥ {MIN_ANNOTATORS})")
+    lines.append(
+        f"  labeled items     : {hl.n_items} (floor ≥ {MIN_ITEMS})"
+        + ("   ** UNDER-POWERED **" if under_powered else "")
+    )
+    lines.append(f"  substitution ε    : {hl.epsilon:.2f}")
+    lines.append(f"  IAA Krippendorff α: {hl.iaa_alpha:.4f}")
+    lines.append(
+        f"  DISPUTED dropped  : {len(hl.disputed)}"
+        + (f" ({', '.join(hl.disputed)})" if hl.disputed else "")
+    )
+    if hl.notes:
+        lines.append("  notes:")
+        lines.extend(f"    - {note}" for note in hl.notes)
+    lines.append("")
+    if under_powered:
+        lines.append(
+            "  VALID but UNDER-POWERED — accepted by `characterize --human-labels`, but ω is "
+            "under-powered below the 30-item floor (add items). No model was seated for this check."
+        )
+    else:
+        lines.append(
+            "  VALID — accepted by `characterize --human-labels`. No model was seated for this "
+            "check (ω stays the circular model-jury bootstrap until ≥3 INDEPENDENT humans exist)."
+        )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+    # Machine JSON → STDOUT (mirrors the run report's `human_alt_test` block).
+    sys.stdout.write(
+        _json.dumps(
+            {
+                "ok": True,
+                "path": str(path),
+                "items_source": items_source,
+                "n_calibration_items": len(items),
+                "n_annotators": hl.n_annotators,
+                "n_items_labeled": hl.n_items,
+                "epsilon": hl.epsilon,
+                "iaa_krippendorff_alpha": round(hl.iaa_alpha, 4),
+                "disputed_items": hl.disputed,
+                "n_disputed": len(hl.disputed),
+                "under_powered": under_powered,
+                "notes": hl.notes,
+            },
+            default=str,
+        )
+        + "\n"
+    )
     return 0
 
 
