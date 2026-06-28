@@ -765,6 +765,11 @@ def main(argv: list[str] | None = None) -> int:
         "known_groups": known_groups_report(items, records),
         "panel_correlation": panel_correlation_report(records),
         "irt_prune": irt_prune_report(records),
+        # The majority-collapsed per-item panel verdict grid ({model: {item_id: correct}}).
+        # Persisted so the harder-set CURATION (calibration.curate / `ai-crucible calibration
+        # curate`) and any subset re-analysis can run OFFLINE from a committed report — without
+        # re-running the panel.
+        "grade_matrix": _grade_matrix(records),
         "perturbation": perturbation_report(records),
         "calibration": calibration_report(records),
         "panel_composition": panel_composition_report(profiles, records),

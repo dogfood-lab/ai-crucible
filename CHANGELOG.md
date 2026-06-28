@@ -49,6 +49,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   ("Retiring the circular omega (Fork C)"). This is intake plumbing only — it fabricates no labels,
   and ω stays the circular model-jury bootstrap until ≥3 *independent* humans exist.
 
+- **`ai-crucible calibration curate` + `calibration/curate.py` — the harder-set curation pipeline
+  (study-swarm Phase A).** Research-grounded (design in `swarm/openrouter-quorum/STUDY-SWARM-harder-
+  calibration-set.md`) response to the run's #1 lever: only 11/93 admission items discriminate among
+  strong judges. The pipeline has two steps. (1) **Discrimination screen** (AFLite, Le Bras 2020;
+  Fisher-info selection, Zhou 2025): given a candidate pool + a characterization run's persisted
+  `grade_matrix`, keep the items strong judges DISAGREE on and drop the saturated ones every judge
+  passes — moving the §12 IRT saturation screen UPSTREAM into a forward curation step (reuses
+  `irt.prune_items`). (2) **Ambiguity gate** (`ambiguity_gate`; GPQA difficulty-vs-ambiguity, Rein
+  2023; dual verification, JudgeBench 2024): a harder item must keep a DEFENSIBLE key — given ≥2
+  independent verifier verdicts, verifier disagreement = AMBIGUOUS (omit), verifiers-agree-but-differ-
+  from-gold = MISLABELED (omit), agree-with-gold = DEFENSIBLE (keep). The crown-jewel constraint: a
+  harder set must never become an ambiguous set. The offline CLI runs the discrimination screen and,
+  with `--out`, writes the kept subset as a calibration JSON directly re-usable as `characterize
+  --items`; the ambiguity gate ships as a tested library function (it needs live verifier verdicts).
+  The characterization report now persists the `grade_matrix` so curation + subset re-analysis run
+  offline from a committed report. NO model seated, NO GPU. (Phase A is the pipeline; Phase B feeds it
+  new-construct content — the genuinely-harder items.)
+
 ### Fixed
 - **Eval-integrity: the answer-key bait penalty was evadable (CRITICAL).** The grading host detected
   a sealed-answer-key touch only when the Solver read it via an allowlisted command

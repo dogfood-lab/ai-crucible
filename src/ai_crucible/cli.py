@@ -110,6 +110,14 @@ commands:
                  calibration/human_labels.example.json. Human chrome → STDERR; machine
                  JSON → STDOUT. (ω stays the circular model-jury bootstrap until ≥3
                  INDEPENDENT human annotators exist — this is the day-they-arrive plumbing.)
+  calibration    curate a harder, less-saturated discriminating admission set (study-swarm
+                 Phase A). usage:
+                   ai-crucible calibration curate --from-run <report.json>
+                       [--items <pool>] [--out <curated.json>]
+                 Runs the discrimination screen (AFLite/§12: keep what strong judges DISAGREE
+                 on, drop the saturated) over a pool using a run report's persisted
+                 grade_matrix; --out writes the kept subset, re-usable as `characterize
+                 --items`. Offline, NO model. Human chrome → STDERR; machine JSON → STDOUT.
   catalog        read + curate the durable catalog (Epic 4 persistence/graduation). usage:
                    ai-crucible catalog list   [--catalog PATH]
                    ai-crucible catalog show   <puzzle-id> [--catalog PATH]
@@ -163,6 +171,9 @@ def _dispatch(command: str, rest: list[str]) -> int:
 
     if command == "labels":
         return _labels_command(rest)
+
+    if command == "calibration":
+        return _calibration_command(rest)
 
     sys.stderr.write(f"ai-crucible: unknown command {command!r}\n\n{_usage()}")
     return 2
@@ -611,6 +622,157 @@ def _labels_validate(path: Path, items_path: Path | None) -> int:
                 "n_disputed": len(hl.disputed),
                 "under_powered": under_powered,
                 "notes": hl.notes,
+            },
+            default=str,
+        )
+        + "\n"
+    )
+    return 0
+
+
+def _calibration_command(rest: list[str]) -> int:
+    """Handle ``ai-crucible calibration curate --from-run <report.json> [--items] [--out]``.
+
+    The harder-set CURATION pipeline (study-swarm Phase A — the design lives in
+    ``swarm/openrouter-quorum/STUDY-SWARM-harder-calibration-set.md``). Reads a characterization
+    report's persisted ``grade_matrix`` and runs the DISCRIMINATION screen (AFLite/§12: keep the
+    items strong judges DISAGREE on, drop the saturated ones every judge already passes) over the
+    candidate pool, reporting the curated discriminating subset + every drop reason. With ``--out``
+    it writes the kept items as a standalone calibration JSON directly re-usable as ``characterize
+    --items``. The AMBIGUITY GATE (``calibration.curate.ambiguity_gate``) needs >=2 independent
+    verifier verdicts per item, so it is NOT run by this offline command — it ships as a tested
+    library function for the next step. NO model is seated and NO GPU is touched. Human chrome ->
+    STDERR, machine JSON -> STDOUT; a bad invocation is exit 2; a report without a grade_matrix
+    raises a structured ``[CODE] msg (hint:)`` error (exit 1).
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="ai-crucible calibration", add_help=True)
+    sub = parser.add_subparsers(dest="action")
+    p_cur = sub.add_parser(
+        "curate", help="curate the discriminating subset from a run report (offline, no model)"
+    )
+    p_cur.add_argument(
+        "--from-run", type=Path, required=True, dest="from_run",
+        help="a characterization report.json carrying a persisted grade_matrix",
+    )
+    p_cur.add_argument(
+        "--items", type=Path, default=None,
+        help="the candidate item pool (default: the bundled admission_pairs.json)",
+    )
+    p_cur.add_argument(
+        "--out", type=Path, default=None,
+        help="write the curated discriminating subset here (re-usable as `characterize --items`)",
+    )
+    p_cur.add_argument("--min-variance", type=float, default=0.0, dest="min_variance")
+    p_cur.add_argument(
+        "--min-point-biserial", type=float, default=0.1, dest="min_point_biserial"
+    )
+
+    try:
+        args = parser.parse_args(rest)
+    except SystemExit as exc:
+        return int(exc.code) if isinstance(exc.code, int) else 2
+
+    if args.action is None:
+        sys.stderr.write("ai-crucible calibration: a subcommand is required (curate)\n")
+        return 2
+    if args.action == "curate":
+        return _calibration_curate(
+            args.from_run, args.items, args.out, args.min_variance, args.min_point_biserial
+        )
+    sys.stderr.write(f"ai-crucible calibration: unknown subcommand {args.action!r}\n")
+    return 2
+
+
+def _calibration_curate(
+    from_run: Path,
+    items_path: Path | None,
+    out_path: Path | None,
+    min_variance: float,
+    min_point_biserial: float,
+) -> int:
+    """``calibration curate`` — discrimination-curate a pool against a run's grade-matrix (offline).
+
+    Reads ``from_run``'s ``grade_matrix`` (persisted by ``characterize``), runs
+    :func:`~ai_crucible.calibration.curate.curate` over the loaded pool, optionally writes the kept
+    subset to ``out_path`` (the raw pool JSON filtered to the kept ids — same shape, so it drops
+    straight into a future ``characterize --items`` run), and reports. A report predating
+    grade-matrix persistence raises a structured error.
+    """
+    import json as _json
+
+    from ai_crucible.calibration.curate import curate
+    from ai_crucible.calibration.loader import load_items
+
+    pool_path = (
+        items_path
+        if items_path is not None
+        else Path(__file__).parent / "calibration" / "admission_pairs.json"
+    )
+    items = load_items(pool_path)
+
+    report = _json.loads(Path(from_run).read_text(encoding="utf-8"))
+    grade_matrix = report.get("grade_matrix")
+    if not isinstance(grade_matrix, dict) or not grade_matrix:
+        raise ValueError(
+            f"[CALIBRATION_NO_GRADE_MATRIX] the report at {from_run} carries no 'grade_matrix' "
+            "(hint: it predates grade-matrix persistence — re-run `ai-crucible characterize "
+            "--out <report.json>` to produce a curate-able report)"
+        )
+
+    result = curate(
+        items, grade_matrix, min_variance=min_variance, min_point_biserial=min_point_biserial
+    )
+
+    wrote: str | None = None
+    if out_path is not None:
+        raw = _json.loads(Path(pool_path).read_text(encoding="utf-8"))
+        kept = set(result.kept)
+        subset = [it for it in raw if isinstance(it, dict) and it.get("id") in kept]
+        Path(out_path).write_text(_json.dumps(subset, indent=2), encoding="utf-8")
+        wrote = str(out_path)
+
+    # Human chrome -> STDERR.
+    lines = [
+        f"ai-crucible calibration curate — pool {pool_path.name} ({len(items)} items) "
+        f"vs {from_run}"
+    ]
+    lines.extend(f"  {n}" for n in result.notes)
+    if wrote:
+        lines.append(
+            f"  wrote curated subset -> {wrote} "
+            f"({len(result.kept)} items; re-use as `characterize --items {wrote}`)"
+        )
+    else:
+        lines.append(
+            "  (no --out: reporting only; pass --out <curated.json> to materialize the subset)"
+        )
+    lines.append("")
+    lines.append(
+        "  NOTE: discrimination screen only — the AMBIGUITY GATE (defensible-key check) needs >=2"
+    )
+    lines.append(
+        "        independent verifier verdicts per item and is not run by this offline command."
+    )
+    sys.stderr.write("\n".join(lines) + "\n")
+
+    # Machine JSON -> STDOUT.
+    sys.stdout.write(
+        _json.dumps(
+            {
+                "ok": True,
+                "from_run": str(from_run),
+                "pool": pool_path.name,
+                "n_pool_items": len(items),
+                "n_kept": len(result.kept),
+                "kept": result.kept,
+                "n_dropped_saturated": len(result.dropped_saturated),
+                "n_dropped_low_discrimination": len(result.dropped_low_discrimination),
+                "dropped_saturated": result.dropped_saturated,
+                "dropped_low_discrimination": result.dropped_low_discrimination,
+                "ambiguity_gate": "not_run_offline",
+                "wrote": wrote,
             },
             default=str,
         )
